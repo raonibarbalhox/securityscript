@@ -1,0 +1,3092 @@
+<#
+.SYNOPSIS
+    IT Security Control Script - Version 1.0
+.DESCRIPTION
+    Advanced Windows security assessment and documentation tool
+    Generates comprehensive HTML report with interactive navigation
+.NOTES
+    Version: 2.0
+    Author: IT Security Team
+    Date: 2025-09-01
+    
+    FEATURES:
+    - Interactive HTML report with side navigation
+    - Comprehensive security assessment
+    - Standard compliance verification
+    - Detailed system documentation
+    - Advanced filtering and search
+#>
+
+# Parameters must be at the top of the script
+param(
+    [string]$Module = "",
+    [switch]$NoGUI
+)
+
+# Adicionar função helper global para HTML encoding
+function ConvertTo-SafeHtml {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return "" }
+    
+    return $Text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace('"', "&quot;").Replace("'", "&#39;")
+}
+
+# Force UTF-8 encoding for console output
+# [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+
+# Add Windows Forms for GUI
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# Global variables
+$scriptVersion = "7.0"
+$computerName = $env:COMPUTERNAME
+$currentUser = $env:USERNAME
+$executionDate = Get-Date -Format "yyyy-MM-dd_HH-mm"
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+
+# Configuration Constants
+$script:ComplianceThresholds = @{
+    High = 90
+    Medium = 75
+    Low = 70
+    Acceptable = 85
+}
+
+$script:StatusMappings = @{
+    Success = "Compliant"
+    Failed = "Non-Compliant"
+    Warning = "Review"
+    Error = "Non-Compliant"
+}
+
+# Function to create a search box for tables
+function Get-SearchBox {
+    param(
+        [string]$TableId,
+        [string]$InputId,
+        [array]$Columns
+    )
+    $html = @"
+    <div class='search-box'>
+        <div class='filter-controls'>
+            <label for='$InputId' style='font-weight: bold;'>Search:</label>
+            <input type='text' id='$InputId' onkeyup='filterTable("$TableId", "$InputId")'
+                placeholder='Enter search terms...' style='width: 300px; padding: 8px; margin: 10px; border: 1px solid #ddd; border-radius: 4px;'>
+            <select id='${InputId}Column' style='padding: 8px; border: 1px solid #ddd; border-radius: 4px;'>
+"@
+    for ($i = 0; $i -lt $Columns.Count; $i++) {
+        $html += "<option value='$i'>Search by $($Columns[$i])</option>"
+    }
+    $html += @"
+            </select>
+        </div>
+    </div>
+"@
+    return $html
+}
+
+# GUI Function with Modern Design
+function Show-ScriptSelectionGUI {
+    # Load Windows Forms library
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    # Create main form
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "IT Security Control Script v$scriptVersion"
+    $form.Size = New-Object System.Drawing.Size(700, 600)
+    $form.StartPosition = "CenterScreen"
+    $form.BackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
+    $form.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+
+    # Header Panel
+    $header = New-Object System.Windows.Forms.Panel
+    $header.Size = New-Object System.Drawing.Size(700, 60)
+    $header.BackColor = [System.Drawing.Color]::FromArgb(52, 73, 94)
+    $header.Location = New-Object System.Drawing.Point(0, 0)
+    $form.Controls.Add($header)
+
+    # Title
+    $title = New-Object System.Windows.Forms.Label
+    $title.Text = "IT Security Control Script"
+    $title.Font = New-Object System.Drawing.Font("Segoe UI", 16, [System.Drawing.FontStyle]::Bold)
+    $title.ForeColor = [System.Drawing.Color]::White
+    $title.AutoSize = $true
+    $title.Location = New-Object System.Drawing.Point(20, 15)
+    $header.Controls.Add($title)
+
+    # Information below header
+    $infoPanel = New-Object System.Windows.Forms.Panel
+    $infoPanel.Size = New-Object System.Drawing.Size(660, 50)
+    $infoPanel.Location = New-Object System.Drawing.Point(20, 70)
+    $infoPanel.BackColor = [System.Drawing.Color]::White
+    $infoPanel.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $form.Controls.Add($infoPanel)
+
+    $adminStatus = if ($isAdmin) { "Administrator" } else { "Standard User" }
+    $infoLabel = New-Object System.Windows.Forms.Label
+    $infoLabel.Text = "Computer: $computerName  |  User: $currentUser  |  Privileges: $adminStatus"
+    $infoLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $infoLabel.Location = New-Object System.Drawing.Point(10, 15)
+    $infoLabel.Size = New-Object System.Drawing.Size(630, 20)
+    $infoPanel.Controls.Add($infoLabel)
+
+    # Checkbox Panel
+    $checkboxPanel = New-Object System.Windows.Forms.Panel
+    $checkboxPanel.Size = New-Object System.Drawing.Size(660, 300)
+    $checkboxPanel.Location = New-Object System.Drawing.Point(20, 130)
+    $checkboxPanel.BackColor = [System.Drawing.Color]::White
+    $checkboxPanel.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $checkboxPanel.AutoScroll = $true
+    $form.Controls.Add($checkboxPanel)
+
+    # Checkbox Title Label
+    $checkboxTitle = New-Object System.Windows.Forms.Label
+    $checkboxTitle.Text = "Select the modules you want to include in the report:"
+    $checkboxTitle.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
+    $checkboxTitle.ForeColor = [System.Drawing.Color]::FromArgb(52, 73, 94)
+    $checkboxTitle.Location = New-Object System.Drawing.Point(10, 10)
+    $checkboxTitle.Size = New-Object System.Drawing.Size(630, 25)
+    $checkboxPanel.Controls.Add($checkboxTitle)
+
+    # Array of Modules
+    $modules = @(
+        "Summary Dashboard",
+        "Executive Summary",
+        "System Information",
+        "User Management",
+        "Network Security",
+        "Time Configuration",
+        "Security Controls",
+        "Monitoring",
+        "Event Management",
+        "Software Management",
+        "System Updates",
+        "Service Configuration",
+        "Detailed Logs"
+    )
+
+    # Checkbox Array
+    $checkboxes = @()
+    $currentY = 45
+    foreach ($module in $modules) {
+        # Create checkbox
+        $checkbox = New-Object System.Windows.Forms.CheckBox
+        $checkbox.Text = $module
+        $checkbox.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        $checkbox.ForeColor = [System.Drawing.Color]::FromArgb(52, 73, 94)
+        $checkbox.Checked = $true # Default: Checked
+        $checkbox.Size = New-Object System.Drawing.Size(600, 25)
+        $checkbox.Location = New-Object System.Drawing.Point(20, $currentY)
+        $checkboxPanel.Controls.Add($checkbox)
+        $checkboxes += $checkbox
+        $currentY += 30
+    }
+
+    # Buttons Panel
+    $buttonsPanel = New-Object System.Windows.Forms.Panel
+    $buttonsPanel.Size = New-Object System.Drawing.Size(660, 60)
+    $buttonsPanel.Location = New-Object System.Drawing.Point(20, 450)
+    $form.Controls.Add($buttonsPanel)
+
+    # OK Button
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = "Generate Report"
+    $okButton.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $okButton.BackColor = [System.Drawing.Color]::FromArgb(40, 167, 69)
+    $okButton.ForeColor = [System.Drawing.Color]::White
+    $okButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $okButton.Size = New-Object System.Drawing.Size(150, 40)
+    $okButton.Location = New-Object System.Drawing.Point(150, 10)
+    $buttonsPanel.Controls.Add($okButton)
+
+    # Cancel Button
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = "Cancel"
+    $cancelButton.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $cancelButton.BackColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+    $cancelButton.ForeColor = [System.Drawing.Color]::White
+    $cancelButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $cancelButton.Size = New-Object System.Drawing.Size(150, 40)
+    $cancelButton.Location = New-Object System.Drawing.Point(330, 10)
+    $buttonsPanel.Controls.Add($cancelButton)
+
+    # Show Form
+    $result = $form.ShowDialog()
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        # Return selected modules
+        $selectedModules = $checkboxes | Where-Object { $_.Checked } | ForEach-Object { $_.Text }
+        return @{
+            Action = "run"
+            Modules = $selectedModules -join ","
+        }
+    } else {
+        return @{
+            Action = "cancel"
+        }
+    }
+}
+
+# Initialize global logs and tracking
+$global:logEntries = @()
+$global:changeLog = @()
+$global:checkResults = @{}
+
+# Standard configurations
+$global:standardServices = @{
+    "WinDefend" = @{
+        Category = "Security"
+        Description = "Windows Defender Service"
+        Required = $true
+    }
+    "MpsSvc" = @{
+        Category = "Security"
+        Description = "Windows Firewall"
+        Required = $true
+    }
+    "wuauserv" = @{
+        Category = "System"
+        Description = "Windows Update"
+        Required = $true
+    }
+    "EventLog" = @{
+        Category = "System"
+        Description = "Windows Event Log"
+        Required = $true
+    }
+    "w32time" = @{
+        Category = "System"
+        Description = "Windows Time"
+        Required = $true
+    }
+    "LanmanServer" = @{
+        Category = "Network"
+        Description = "Server Service"
+        Required = $false
+    }
+}
+
+$global:standardSoftware = @{
+    "Windows Defender" = @{
+        Category = "Security"
+        Required = $true
+    }
+    "Microsoft Office" = @{
+        Category = "Productivity"
+        Required = $false
+    }
+    "Trellix Endpoint Security" = @{
+        Category = "Security"
+        Required = $true
+    }
+    "CyberArk" = @{
+        Category = "Security"
+        Required = $true
+    }
+    "Splunk Universal Forwarder" = @{
+        Category = "Monitoring"
+        Required = $true
+    }
+}
+
+# Function to create status indicators with improved tooltips
+function Get-StatusIndicator {
+    param(
+        [string]$Status,
+        [string]$Text = "",
+        [string]$ToolTip = ""
+    )
+    
+    $color = switch ($Status.ToLower()) {
+        "standard" { "#28a745" }     # Green - Meets standard
+        "attention" { "#ffc107" }    # Yellow - Needs review
+        "nonstandard" { "#dc3545" }  # Red - Does not meet standard
+        "information" { "#17a2b8" }  # Blue - Informational
+        default { "#6c757d" }        # Gray - Not applicable
+    }
+    
+    $displayText = if ($Text) { $Text } else { $Status }
+    $tooltipAttr = if ($ToolTip) { "title='$ToolTip'" } else { "" }
+    
+    return "<span style='background-color: $color; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; cursor: help;' $tooltipAttr>$displayText</span>"
+}
+
+# Enhanced logging function
+function Write-LogEntry {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO",
+        [string]$Category = "General",
+        [string]$Impact = "None"
+    )
+    
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = [PSCustomObject]@{
+        Timestamp = $timestamp
+        Level = $Level
+        Category = $Category
+        Message = $Message
+        Impact = $Impact
+    }
+    
+    # Add to global logs
+    $global:logEntries += $logEntry
+    $global:changeLog += $logEntry
+
+    # Console output with color
+    $color = switch ($Level) {
+        "ERROR" { "Red" }
+        "WARNING" { "Yellow" }
+        "SUCCESS" { "Green" }
+        default { "White" }
+    }
+    
+    Write-Host "[$timestamp] [$Level] [$Category] $Message" -ForegroundColor $color
+}
+
+# Function to execute commands safely with enhanced error handling
+function Invoke-SafeCommand {
+    param(
+        [Parameter(Mandatory=$true)]
+        [scriptblock]$Command,
+        
+        [string]$Description,
+        [bool]$RequiresAdmin = $false,
+        [string]$Category = "General",
+        [string]$Impact = "None"
+    )
+    
+    try {
+        if ($RequiresAdmin -and -not $isAdmin) {
+            Write-LogEntry "Skipping $Description - Requires administrative privileges" "WARNING" $Category "Limited"
+            return $null
+        }
+        
+        Write-LogEntry "Executing: $Description" "INFO" $Category $Impact
+        $result = & $Command
+        
+        # Track successful checks
+        $global:checkResults[$Description] = @{
+            Status = "Success"
+            Timestamp = Get-Date
+            Category = $Category
+            Impact = $Impact
+        }
+        
+        return $result
+    }
+    catch {
+        Write-LogEntry "Error in $Description : $($_.Exception.Message)" "ERROR" $Category "Failed"
+        $global:checkResults[$Description] = @{
+            Status = "Failed"
+            Error = $_.Exception.Message
+            Timestamp = Get-Date
+            Category = $Category
+            Impact = $Impact
+        }
+        return $null
+    }
+}
+
+# Function to generate enhanced HTML header with navigation
+function Get-HTMLHeader {
+    return @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IT Security Control Report - $computerName</title>
+    <style>
+        :root {
+            --primary-color: #001b65;
+            --secondary-color: #00A0DF;
+            --accent-color: #3498db;
+            --text-color: #333333;
+            --background-color: #F8F9FA;
+            --success-color: #00A878;
+            --warning-color: #FFB81C;
+            --danger-color: #DC3545;
+            --info-color: #17a2b8;
+        }
+
+    html {
+        scroll-behavior: smooth;
+    }
+    
+    .section {
+        scroll-margin-top: 20px;
+    }
+    
+    body {
+        margin: 0;
+        padding: 0;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        background-color: var(--background-color);
+        color: var(--text-color);
+        line-height: 1.6;
+    }
+
+        .wrapper {
+            display: flex;
+            min-height: 100vh;
+        }
+
+        .navigation {
+            width: 220px;
+            background: var(--primary-color);
+            color: white;
+            padding: 10px 10px 10px 10px;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+        }
+
+        .navigation-header {
+            padding: 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            margin-bottom: 10px;
+        }
+
+        .navigation ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .navigation ul li {
+            margin: 4px 0;
+        }
+
+        .navigation ul li a {
+            color: white;
+            text-decoration: none;
+            padding: 6px 10px;
+            display: block;
+            border-radius: 3px;
+            transition: background-color 0.2s;
+        }
+
+        .navigation ul li a:hover {
+            background-color: var(--secondary-color);
+        }
+
+        .content {
+            flex: 1;
+            margin-left: 230px;
+            padding: 10px;
+        }
+
+        .section {
+            background: white;
+            border-radius: 5px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.07);
+            margin-bottom: 14px;
+            padding: 12px 12px 10px 12px;
+        }
+
+        .section h2 {
+            color: var(--primary-color);
+            border-bottom: 2px solid var(--accent-color);
+            padding-bottom: 5px;
+            margin-top: 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0;
+            background: white;
+            border-radius: 4px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.07);
+        }
+
+        th, td {
+            padding: 7px 8px;
+            border: 1px solid #dee2e6;
+            text-align: left;
+        }
+
+        th {
+            background-color: var(--primary-color);
+            color: white;
+            font-weight: 600;
+        }
+
+        tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+
+        tr:hover {
+            background-color: #e9ecef;
+        }
+
+        .search-box {
+            margin: 10px 0;
+            padding: 8px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            border: 1px solid #dee2e6;
+        }
+
+        .search-box input, .search-box select {
+            padding: 5px;
+            margin: 2px;
+            border: 1px solid #ced4da;
+            border-radius: 3px;
+            width: 140px;
+        }
+
+        .status-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 7px;
+            margin: 10px 0;
+            padding: 6px;
+            background: #f8f9fa;
+            border-radius: 5px;
+        }
+
+        .summary-box {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 10px;
+            margin: 10px 0;
+        }
+
+        .summary-item {
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            text-align: center;
+        }
+
+        .summary-item h3 {
+            margin: 0;
+            font-size: 1.2em;
+        }
+
+        .summary-item p {
+            margin: 3px 0 0 0;
+            opacity: 0.9;
+        }
+
+        .mandatory {
+            background-color: #e3f2fd !important;
+            font-weight: bold;
+        }
+    </style>
+
+    <script>
+        // Improved search function with multi-term support
+    function filterTable(tableId, inputId) {
+    const input = document.getElementById(inputId);
+    const filter = input.value.toLowerCase();
+    const table = document.getElementById(tableId);
+    const tr = table.getElementsByTagName('tr');
+    const column = parseInt(document.getElementById(inputId + 'Column').value);
+
+    for (let i = 1; i < tr.length; i++) {
+        const td = tr[i].getElementsByTagName('td')[column];
+        if (td) {
+            const txtValue = td.textContent || td.innerText;
+            tr[i].style.display = txtValue.toLowerCase().includes(filter) ? '' : 'none';
+        }
+    }
+}
+
+        // Accordion functionality for changelog
+        function toggleAccordion(headerId) {
+            const content = document.getElementById(headerId + '-content');
+            const allContents = document.getElementsByClassName('accordion-content');
+            
+            // Close all other accordions
+            Array.from(allContents).forEach(item => {
+                if (item.id !== headerId + '-content') {
+                    item.style.display = 'none';
+                }
+            });
+
+            // Toggle current accordion
+            content.style.display = content.style.display === 'none' ? 'block' : 'none';
+        }
+
+        // Section show/hide with fade effect
+        function toggleSection(sectionId) {
+            const content = document.getElementById(sectionId + '-content');
+            const button = document.getElementById(sectionId + '-toggle');
+            const isVisible = !content.classList.contains('hidden');
+
+            if (isVisible) {
+                content.classList.add('hidden');
+                button.textContent = 'Show';
+            } else {
+                content.classList.remove('hidden');
+                button.textContent = 'Hide';
+            }
+
+            localStorage.setItem(sectionId + '-state', isVisible ? 'hidden' : 'visible');
+        }
+
+        // Initialize on page load
+        window.onload = function() {
+            // Restore section states
+            document.querySelectorAll('[id$="-content"]').forEach(section => {
+                const sectionId = section.id.replace('-content', '');
+                const savedState = localStorage.getItem(sectionId + '-state');
+                if (savedState === 'hidden') {
+                    toggleSection(sectionId);
+                }
+            });
+
+            // Open first changelog category
+            const firstAccordion = document.querySelector('.accordion-content');
+            if (firstAccordion) {
+                firstAccordion.style.display = 'block';
+            }
+        }
+    </script>
+</head>
+<body>
+<div class="container">
+<div class="wrapper">
+<nav class="navigation">
+    <div class="navigation-header">
+        <h3>Report Sections</h3>
+    </div>
+    <ul>
+        <li><a href="#summary">Summary Dashboard</a></li>
+        <li><a href="#executive">Executive Summary</a></li>
+        <li><a href="#system">System Information</a></li>
+        <li><a href="#users">User Management</a></li>
+        <li><a href="#network">Network Security</a></li>
+        <li><a href="#time">Time Configuration</a></li>
+        <li><a href="#monitoring">Monitoring</a></li>
+        <li><a href="#events">Event Management</a></li>
+        <li><a href="#software">Software Management</a></li>
+        <li><a href="#updates">System Updates</a></li>
+        <li><a href="#services">Service Configuration</a></li>
+        <li><a href="#securitycontrols">IRM Security Controls</a></li>
+        <li><a href="#logs">Detailed Logs</a></li>
+    </ul>
+</nav>
+    <div class="content">
+        <div class="section">
+                            return @"
+                            <div style='text-align:center; font-family:Segoe UI; margin-top:20px;'>
+                            <h1 style='color:#2c3e50;'>IT Security Control Report</h1>
+                            <p><strong>IT Security Control Script v$scriptVersion</strong></p>
+                            <p><strong>Computer:</strong> $computerName</p>
+                            <p><strong>Generated:</strong> $executionDate</p>
+                            <p><strong>User:</strong> $currentUser</p>
+        </div>
+        <hr>
+"@
+}
+
+# --- Improved BitLocker Status using manage-bde ---
+function Get-BitLockerStatusTable {
+    Write-LogEntry "Generating BitLocker section..." "INFO" "Security"
+    $html = "<h3>BitLocker Encryption Status</h3>"
+    
+    # Helper local para HTML-encode (básico)
+    function _Html([string]$s) {
+        if ($null -eq $s) { return "" }
+        return $s.Replace("&","&amp;").Replace("<","&lt;").Replace(">","&gt;").Replace('"',"&quot;").Replace("'","&#39;")
+    }
+    
+    # 1) Tentar Get-BitLockerVolume (mais robusto e neutro de idioma)
+    $vols = Invoke-SafeCommand -Command {
+        try {
+            if (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) {
+                Get-BitLockerVolume
+            } else { $null }
+        } catch { $null }
+    } -Description "BitLocker Volume (native)" -Category "Security"
+    
+    # 2) Fallback para manage-bde -status se necessário
+    if (-not $vols) {
+        $bitlockerStatusRaw = Invoke-SafeCommand -Command { manage-bde -status } -Description "BitLocker Detailed Status" -Category "Security"
+        if ($bitlockerStatusRaw) {
+            $parsed = @()
+            $current = @{}
+            foreach ($line in $bitlockerStatusRaw) {
+                if ($line -match "^(Volume|Unidade|Volume Name):\s*(.+)$") {
+                    if ($current.Count) { $parsed += $current; $current = @{} }
+                    $current["Volume"] = $matches[2].Trim()
+                } elseif ($line -match "^(Mount Point|Ponto de Montagem):\s*(.+)$") {
+                    $current["MountPoint"] = $matches[2].Trim()
+                } elseif ($line -match "^(Conversion Status|Status da Conversão):\s*(.+)$") {
+                    $current["VolumeStatus"] = $matches[2].Trim()
+                } elseif ($line -match "^(Percentage Encrypted|Porcentagem Criptografada):\s*(.+)$") {
+                    $current["EncryptionPercentage"] = $matches[2].Trim()
+                } elseif ($line -match "^(Encryption Method|Método de Criptografia):\s*(.+)$") {
+                    $current["EncryptionMethod"] = $matches[2].Trim()
+                } elseif ($line -match "^(Protection Status|Status de Proteção):\s*(.+)$") {
+                    $current["ProtectionStatus"] = $matches[2].Trim()
+                }
+            }
+            if ($current.Count) { $parsed += $current }
+            $vols = $parsed
+        }
+    }
+    
+    if (-not $vols) {
+        $html += "<div class='info-box'><p>BitLocker information not available or requires administrator privileges.</p></div>"
+        return $html
+    }
+    
+    # Caixa de busca e cabeçalho
+    $html += Get-SearchBox -TableId "bitlockerTable" -InputId "bitlockerSearch" -Columns @(
+        "Volume", "Mount Point", "Status", "Percentage", "Method", "Protection"
+    )
+    
+    $html += "<table id='bitlockerTable'>"
+    $html += "<tr>
+                <th onclick='sortTable(""bitlockerTable"", 0)'>Volume</th>
+                <th onclick='sortTable(""bitlockerTable"", 1)'>Mount Point</th>
+                <th onclick='sortTable(""bitlockerTable"", 2)'>Status</th>
+                <th onclick='sortTable(""bitlockerTable"", 3)'>Percentage</th>
+                <th onclick='sortTable(""bitlockerTable"", 4)'>Method</th>
+                <th onclick='sortTable(""bitlockerTable"", 5)'>Protection</th>
+              </tr>"
+    
+    # Normalização de propriedades para ambos os caminhos
+    foreach ($v in $vols) {
+        $mountPoint = $null
+        $statusText = $null
+        $percentVal = $null
+        $method = $null
+        $protVal = $null
+        
+        # Detectar se é Get-BitLockerVolume ou manage-bde parsed
+        if ($v.PSObject.Properties.Name -contains 'MountPoint') {
+            # Get-BitLockerVolume object
+            $mountPoint = ($v.MountPoint -join ', ')
+            $statusText = $v.VolumeStatus
+            $percentVal = [double]($v.EncryptionPercentage)
+            $method = $v.EncryptionMethod
+            $protVal = $v.ProtectionStatus
+        } else {
+            # manage-bde parsed hashtable
+            $mountPoint = $v["MountPoint"]
+            $statusText = $v["VolumeStatus"]
+            $method = $v["EncryptionMethod"]
+            $protVal = $v["ProtectionStatus"]
+            $percentVal = 0
+            if ($v["EncryptionPercentage"]) {
+                $percentVal = (($v["EncryptionPercentage"] -replace "[^0-9\.]", "") -as [double])
+            }
+        }
+        
+        # Indicadores de status
+        $statusIndicator = if ($statusText -match "(Fully|Criptografad|Encrypted)") {
+            Get-StatusIndicator -Status "standard" -Text "Encrypted" -ToolTip "Volume fully encrypted"
+        } elseif ($statusText -match "(In Progress|Em Andamento|Encrypting|Decryption)") {
+            Get-StatusIndicator -Status "attention" -Text (_Html($statusText)) -ToolTip "Encryption in progress"
+        } else {
+            Get-StatusIndicator -Status "nonstandard" -Text (_Html($statusText)) -ToolTip "Not encrypted"
+        }
+        
+        $percentIndicator = if ($percentVal -ge 99) {
+            Get-StatusIndicator -Status "standard" -Text ("{0}%" -f [math]::Round($percentVal,0)) -ToolTip "Fully encrypted"
+        } elseif ($percentVal -gt 0) {
+            Get-StatusIndicator -Status "attention" -Text ("{0}%" -f [math]::Round($percentVal,0)) -ToolTip "Encryption in progress"
+        } else {
+            Get-StatusIndicator -Status "nonstandard" -Text "0%" -ToolTip "Not encrypted"
+        }
+        
+        $protIndicator = if ($protVal -match "(On|Ativada|Enabled)") {
+            Get-StatusIndicator -Status "standard" -Text "Protected" -ToolTip "Protection is active"
+        } else {
+            Get-StatusIndicator -Status "nonstandard" -Text "Not Protected" -ToolTip "Protection is not active"
+        }
+        
+        $html += "<tr>"
+        $html += "<td>$(_Html($mountPoint))</td>"
+        $html += "<td>$(_Html($mountPoint))</td>"
+        $html += "<td>$statusIndicator</td>"
+        $html += "<td>$percentIndicator</td>"
+        $html += "<td>$(_Html($method))</td>"
+        $html += "<td>$protIndicator</td>"
+        $html += "</tr>"
+    }
+    $html += "</table>"
+    
+    # TPM (opcional e resumido)
+    $tpm = Invoke-SafeCommand -Command {
+        try {
+            if (Get-Command Get-Tpm -ErrorAction SilentlyContinue) { Get-Tpm } else { $null }
+        } catch { $null }
+    } -Description "TPM Info" -Category "Security"
+    
+    if ($tpm) {
+        $enabled = if ($tpm.TpmPresent -and $tpm.TpmEnabled) { "Yes" } else { "No" }
+        $owned = if ($tpm.TpmOwned) { "Yes" } else { "No" }
+        $html += "<div class='summary-box'>"
+        $html += "<div class='summary-item'><h3>TPM</h3><p>Present/Enabled: $enabled | Owned: $owned</p></div>"
+        $html += "</div>"
+    }
+    
+    # Legenda
+    $html += "<div class='status-legend'>"
+    $html += "<h4>Status Indicators</h4>"
+    $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "standard" -Text "OK") + " Properly configured</div>"
+    $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "attention" -Text "Review") + " Needs attention</div>"
+    $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "nonstandard" -Text "Action") + " Does not meet requirements</div>"
+    $html += "</div>"
+    
+    return $html
+}
+
+# Function to generate improved Summary Dashboard
+function Get-SummaryDashboard {
+    Write-LogEntry "Generating summary dashboard..." "INFO" "Summary"
+    
+    $html = "<div class='section' id='summary'><h2>Summary Dashboard</h2>"
+    
+    try {
+        # System Health Indicators
+        $indicators = @{
+            Security = "Unknown"
+            Updates = "Unknown"  
+            Services = "Unknown"
+            Compliance = "Unknown"
+        }
+
+        # Security Status
+        if ($global:checkResults["Security Status"]) {
+            $indicators.Security = if ($global:checkResults["Security Status"].Status -eq "Success") { "Protected" } else { "Issues Detected" }
+        }
+
+        # Updates Status  
+        if ($global:checkResults["Windows Update Service"]) {
+            $indicators.Updates = if ($global:checkResults["Windows Update Service"].Status -eq "Success") { "Current" } else { "Check Required" }
+        }
+
+        # Services Status
+        $criticalServices = @("WinDefend", "MpsSvc", "wuauserv", "EventLog")
+        $serviceIssues = 0
+        foreach ($serviceName in $criticalServices) {
+            if ($global:checkResults[$serviceName] -and $global:checkResults[$serviceName].Status -ne "Success") {
+                $serviceIssues++
+            }
+        }
+        $indicators.Services = if ($serviceIssues -eq 0) { "Running" } else { "Review Required" }
+
+        # Overall Compliance
+        $totalChecks = $global:checkResults.Count
+        $passedChecks = ($global:checkResults.Values | Where-Object { $_.Status -eq "Success" }).Count
+        $complianceRate = if ($totalChecks -gt 0) { [math]::Round(($passedChecks / $totalChecks) * 100, 0) } else { 100 }
+        
+        $indicators.Compliance = if ($complianceRate -ge 90) { "Compliant" }
+                                elseif ($complianceRate -ge 75) { "Minor Issues" }
+                                else { "Action Required" }
+
+        # Main Dashboard
+        $html += "<div class='summary-box'>"
+        
+        # Overall Status
+        $overallStatus = if ($indicators.Security -eq "Protected" -and $indicators.Services -eq "Running" -and $complianceRate -ge 85) {
+            "System Healthy"
+        } elseif ($serviceIssues -eq 0 -and $complianceRate -ge 70) {
+            "Minor Issues"
+        } else {
+            "Action Required"
+        }
+        
+        $overallColor = switch ($overallStatus) {
+            "System Healthy" { "var(--success-color)" }
+            "Minor Issues" { "var(--warning-color)" }
+            default { "var(--danger-color)" }
+        }
+        
+        $html += "<div class='summary-item' style='background: linear-gradient(135deg, $overallColor 0%, $overallColor 100%);'>"
+        $html += "<h3>$overallStatus</h3>"
+        $html += "<p>Overall Status</p>"
+        $html += "</div>"
+
+        # Individual indicators
+        foreach ($indicator in $indicators.GetEnumerator()) {
+            $color = switch ($indicator.Value) {
+                { $_ -in @("Protected", "Current", "Running", "Compliant") } { "var(--success-color)" }
+                { $_ -in @("Minor Issues", "Check Required", "Review Required") } { "var(--warning-color)" }
+                default { "var(--danger-color)" }
+            }
+            
+            $html += "<div class='summary-item' style='background: linear-gradient(135deg, $color 0%, $color 100%);'>"
+            $html += "<h3>$($indicator.Value)</h3>"
+            $html += "<p>$($indicator.Key)</p>"
+            $html += "</div>"
+        }
+        
+        $html += "</div>"
+
+        # Quick Actions Section
+        $html += "<h3>Quick Actions</h3>"
+        $html += "<table>"
+        $html += "<tr><th>Category</th><th>Status</th><th>Recommendation</th></tr>"
+
+        # Security
+        $securityAction = if ($indicators.Security -eq "Protected") {
+            "Continue monitoring"
+        } else {
+            "Review antivirus and firewall settings"
+        }
+        
+        $securityStatus = if ($indicators.Security -eq "Protected") {
+            Get-StatusIndicator -Status "standard" -Text "Good"
+        } else {
+            Get-StatusIndicator -Status "attention" -Text "Review"
+        }
+        
+        $html += "<tr><td><a href='#network'>Security Controls</a></td><td>$securityStatus</td><td>$securityAction</td></tr>"
+
+        # Updates
+        $updateAction = if ($indicators.Updates -eq "Current") {
+            "System is up to date"
+        } else {
+            "Check Windows Update service and recent updates"
+        }
+        
+        $updateStatus = if ($indicators.Updates -eq "Current") {
+            Get-StatusIndicator -Status "standard" -Text "Current"
+        } else {
+            Get-StatusIndicator -Status "attention" -Text "Check"
+        }
+        
+        $html += "<tr><td><a href='#software'>System Updates</a></td><td>$updateStatus</td><td>$updateAction</td></tr>"
+
+        # Services
+        $serviceAction = if ($indicators.Services -eq "Running") {
+            "All critical services operational"
+        } else {
+            "Review critical service status"
+        }
+        
+        $serviceStatus = if ($indicators.Services -eq "Running") {
+            Get-StatusIndicator -Status "standard" -Text "Running"
+        } else {
+            Get-StatusIndicator -Status "attention" -Text "Review"
+        }
+        
+        $html += "<tr><td><a href='#services'>Service Status</a></td><td>$serviceStatus</td><td>$serviceAction</td></tr>"
+        
+        $html += "</table>"
+
+        # System Information Summary
+        $html += "<h3>System Information</h3>"
+        $html += "<table>"
+        $html += "<tr><th>Property</th><th>Value</th></tr>"
+        $html += "<tr><td>Computer Name</td><td>$computerName</td></tr>"
+        $html += "<tr><td>Report Generated</td><td>$executionDate</td></tr>"
+        $html += "<tr><td>User Context</td><td>$currentUser $(if ($isAdmin) { '(Administrator)' } else { '(Standard User)' })</td></tr>"
+        $html += "<tr><td>Compliance Score</td><td>$complianceRate% ($passedChecks/$totalChecks checks passed)</td></tr>"
+        $html += "</table>"
+    }
+    catch {
+        Write-LogEntry "Error generating summary dashboard: $($_.Exception.Message)" "ERROR" "Summary"
+        $html += "<div class='error-log'>"
+        $html += "<p>Error generating dashboard summary.</p>"
+        $html += "</div>"
+    }
+
+    $html += "</div>" # End section
+    return $html
+}
+
+# Function to generate Executive Summary
+function Get-ExecutiveSummary {
+    Write-LogEntry "Generating executive summary..." "INFO" "Executive"
+    
+    $html = "<div class='section' id='executive'><h2>Executive Summary</h2>"
+    
+    try {
+        # Calculate compliance metrics
+        $metrics = @{
+            TotalChecks = 0
+            PassedChecks = 0
+            NeedsReview = 0
+            NonStandard = 0
+            CriticalIssues = 0
+        }
+
+        foreach ($result in $global:checkResults.Values) {
+            $metrics.TotalChecks++
+            switch ($result.Status) {
+                "Success" { $metrics.PassedChecks++ }
+                "Warning" { $metrics.NeedsReview++ }
+                "Failed" { 
+                    $metrics.NonStandard++
+                    if ($result.Category -in @("Security", "Services")) {
+                        $metrics.CriticalIssues++
+                    }
+                }
+            }
+        }
+
+        # Overall Compliance Rate
+        $complianceRate = if ($metrics.TotalChecks -gt 0) {
+            [math]::Round(($metrics.PassedChecks / $metrics.TotalChecks) * 100, 0)
+        } else { 100 }
+
+        # Risk Assessment
+        $riskLevel = if ($metrics.CriticalIssues -gt 0) {
+            "High"
+        } elseif ($metrics.NonStandard -gt 2) {
+            "Medium"  
+        } elseif ($metrics.NeedsReview -gt 5) {
+            "Low"
+        } else {
+            "Minimal"
+        }
+
+        # Main Summary Dashboard
+        $html += "<div class='summary-box'>"
+        
+        # Compliance Score
+        $complianceColor = if ($complianceRate -ge 90) { "var(--success-color)" } 
+                          elseif ($complianceRate -ge 75) { "var(--warning-color)" }
+                          else { "var(--danger-color)" }
+        
+        $html += "<div class='summary-item' style='background: linear-gradient(135deg, $complianceColor 0%, $complianceColor 100%);'>"
+        $html += "<h3>$complianceRate%</h3>"
+        $html += "<p>Compliance Score</p>"
+        $html += "</div>"
+
+        # Risk Level
+        $riskColor = switch ($riskLevel) {
+            "Minimal" { "var(--success-color)" }
+            "Low" { "var(--info-color)" }
+            "Medium" { "var(--warning-color)" }
+            "High" { "var(--danger-color)" }
+        }
+        
+        $html += "<div class='summary-item' style='background: linear-gradient(135deg, $riskColor 0%, $riskColor 100%);'>"
+        $html += "<h3>$riskLevel</h3>"
+        $html += "<p>Risk Level</p>"
+        $html += "</div>"
+
+        # Issues to Address
+        $totalIssues = $metrics.NonStandard + $metrics.NeedsReview
+        $issueColor = if ($totalIssues -eq 0) { "var(--success-color)" }
+                     elseif ($totalIssues -le 3) { "var(--warning-color)" }
+                     else { "var(--danger-color)" }
+        
+        $html += "<div class='summary-item' style='background: linear-gradient(135deg, $issueColor 0%, $issueColor 100%);'>"
+        $html += "<h3>$totalIssues</h3>"
+        $html += "<p>Issues to Address</p>"
+        $html += "</div>"
+
+        # System Status
+        $systemStatus = if ($metrics.CriticalIssues -eq 0 -and $complianceRate -ge 90) { "Compliant" }
+                       elseif ($metrics.CriticalIssues -eq 0) { "Minor Issues" }
+                       else { "Action Required" }
+        
+        $statusColor = if ($systemStatus -eq "Compliant") { "var(--success-color)" }
+                      elseif ($systemStatus -eq "Minor Issues") { "var(--warning-color)" }
+                      else { "var(--danger-color)" }
+        
+        $html += "<div class='summary-item' style='background: linear-gradient(135deg, $statusColor 0%, $statusColor 100%);'>"
+        $html += "<h3>$systemStatus</h3>"
+        $html += "<p>Overall Status</p>"
+        $html += "</div>"
+
+        $html += "</div>" # End summary-box
+
+        # Priority Actions (only if issues exist)
+        if ($totalIssues -gt 0) {
+            $html += "<h3>Priority Actions Required</h3>"
+            $html += "<table>"
+            $html += "<tr><th>Priority</th><th>Category</th><th>Action</th><th>Impact</th></tr>"
+
+            # Add high priority items first
+            if ($metrics.CriticalIssues -gt 0) {
+                $html += "<tr>"
+                $html += "<td>" + (Get-StatusIndicator -Status "nonstandard" -Text "High") + "</td>"
+                $html += "<td>Security/Services</td>"
+                $html += "<td>Review and fix $($metrics.CriticalIssues) critical security or service issues</td>"
+                $html += "<td>Immediate</td>"
+                $html += "</tr>"
+            }
+
+            if ($metrics.NonStandard -gt $metrics.CriticalIssues) {
+                $remainingIssues = $metrics.NonStandard - $metrics.CriticalIssues
+                $html += "<tr>"
+                $html += "<td>" + (Get-StatusIndicator -Status "attention" -Text "Medium") + "</td>"
+                $html += "<td>Configuration</td>"
+                $html += "<td>Address $remainingIssues configuration issues</td>"
+                $html += "<td>Next maintenance window</td>"
+                $html += "</tr>"
+            }
+
+            if ($metrics.NeedsReview -gt 0) {
+                $html += "<tr>"
+                $html += "<td>" + (Get-StatusIndicator -Status "information" -Text "Low") + "</td>"
+                $html += "<td>Review</td>"
+                $html += "<td>Review $($metrics.NeedsReview) items for optimization</td>"
+                $html += "<td>Next scheduled review</td>"
+                $html += "</tr>"
+            }
+
+            $html += "</table>"
+        } else {
+            $html += "<div class='info-box'>"
+            $html += "<h3>✓ System Status: Compliant</h3>"
+            $html += "<p>No immediate action required. System meets compliance requirements.</p>"
+            $html += "</div>"
+        }
+
+        # Recommendations (simplified)
+        if (-not $isAdmin) {
+            $html += "<h3>Additional Notes</h3>"
+            $html += "<ul><li>Some checks require administrator privileges for complete assessment</li></ul>"
+        }
+    }
+    catch {
+        Write-LogEntry "Error generating executive summary: $($_.Exception.Message)" "ERROR" "Executive"
+        $html += "<div class='error-log'>"
+        $html += "<p>Error generating executive summary. Please check system permissions.</p>"
+        $html += "</div>"
+    }
+
+    $html += "</div>" # End section
+    return $html
+}
+
+# Function to get detailed system information
+function Get-SystemInformation {
+    Write-LogEntry "Collecting system information..." "INFO" "SystemInfo"
+    
+    $html = "<div class='section' id='system'><h2>System and Hardware Information</h2>"
+    
+    try {
+        # System Overview
+        $systemInfo = Invoke-SafeCommand -Command {
+            Get-ComputerInfo | Select-Object @{
+                Name = "OSName"; Expression = {$_.WindowsProductName}
+            },
+            @{Name = "OSVersion"; Expression = {$_.WindowsVersion}},
+            @{Name = "OSBuild"; Expression = {$_.WindowsBuildLabEx}},
+            @{Name = "SystemType"; Expression = {$_.CsSystemType}},
+            @{Name = "TotalMemory"; Expression = {[math]::Round($_.CsTotalPhysicalMemory/1GB, 2)}},
+            @{Name = "BIOSVersion"; Expression = {$_.BiosVersion}},
+            @{Name = "BIOSManufacturer"; Expression = {$_.BiosManufacturer}},
+            @{Name = "Domain"; Expression = {$_.CsDomain}},
+            @{Name = "TimeZone"; Expression = {$_.TimeZone}}
+        } -Description "Basic System Information" -Category "SystemInfo"
+
+        if ($systemInfo) {
+            $html += "<h3>System Overview</h3>"
+            $html += "<table id='sysInfoTable'>"
+            $html += "<tr><th>Property</th><th>Value</th><th>Status</th></tr>"
+
+            # OS Information with Status
+            $osStatus = if ($systemInfo.OSVersion -match "^10\.0") {
+                Get-StatusIndicator -Status "standard" -Text "Supported" -ToolTip "Running supported Windows version"
+            } else {
+                Get-StatusIndicator -Status "attention" -Text "Review" -ToolTip "OS version needs review"
+            }
+            
+            $html += "<tr><td>Operating System</td><td>$($systemInfo.OSName)</td><td>$osStatus</td></tr>"
+            $html += "<tr><td>OS Version</td><td>$($systemInfo.OSVersion)</td><td>$osStatus</td></tr>"
+            $html += "<tr><td>OS Build</td><td>$($systemInfo.OSBuild)</td><td></td></tr>"
+
+            # Memory Status
+            $memoryStatus = if ($systemInfo.TotalMemory -ge 8) {
+                Get-StatusIndicator -Status "standard" -Text "Adequate" -ToolTip "Sufficient memory installed"
+            } elseif ($systemInfo.TotalMemory -ge 4) {
+                Get-StatusIndicator -Status "attention" -Text "Review" -ToolTip "Memory might need upgrade"
+            } else {
+                Get-StatusIndicator -Status "nonstandard" -Text "Low" -ToolTip "Memory upgrade recommended"
+            }
+            
+            $html += "<tr><td>Total Memory (GB)</td><td>$($systemInfo.TotalMemory)</td><td>$memoryStatus</td></tr>"
+
+            # Domain Status
+            $domainStatus = if ($systemInfo.Domain -notmatch "WORKGROUP") {
+                Get-StatusIndicator -Status "standard" -Text "Domain Joined" -ToolTip "Computer is domain-joined"
+            } else {
+                Get-StatusIndicator -Status "attention" -Text "Workgroup" -ToolTip "Computer is not domain-joined"
+            }
+            
+            $html += "<tr><td>Domain</td><td>$($systemInfo.Domain)</td><td>$domainStatus</td></tr>"
+            $html += "</table>"
+        }
+
+        # Hardware Information
+        $hardwareInfo = Invoke-SafeCommand -Command {
+            Get-WmiObject -Class Win32_ComputerSystem | Select-Object Manufacturer,
+                                                                Model,
+                                                                SystemType,
+                                                                NumberOfProcessors,
+                                                                NumberOfLogicalProcessors,
+                                                                TotalPhysicalMemory,
+                                                                @{Name="IsVirtual";Expression={
+                                                                    $_.Model -match "Virtual|VMware|Hyper-V"
+                                                                }}
+        } -Description "Hardware Information" -Category "Hardware"
+
+        if ($hardwareInfo) {
+            $html += "<h3>Hardware Configuration</h3>"
+            $html += "<table>"
+            $html += "<tr><th>Property</th><th>Value</th><th>Details</th></tr>"
+
+            # System Type (Physical/Virtual)
+            $systemTypeStatus = if ($hardwareInfo.IsVirtual) {
+                Get-StatusIndicator -Status "information" -Text "Virtual Machine" -ToolTip "System is running in a virtual environment"
+            } else {
+                Get-StatusIndicator -Status "information" -Text "Physical Machine" -ToolTip "System is running on physical hardware"
+            }
+            
+            $html += "<tr><td>System Type</td><td>$($hardwareInfo.SystemType)</td><td>$systemTypeStatus</td></tr>"
+            $html += "<tr><td>Manufacturer</td><td>$($hardwareInfo.Manufacturer)</td><td></td></tr>"
+            $html += "<tr><td>Model</td><td>$($hardwareInfo.Model)</td><td></td></tr>"
+
+            # Processor Information
+            $processorStatus = if ($hardwareInfo.NumberOfLogicalProcessors -ge 4) {
+                Get-StatusIndicator -Status "standard" -Text "Adequate" -ToolTip "Sufficient processing power"
+            } else {
+                Get-StatusIndicator -Status "attention" -Text "Review" -ToolTip "Processing power might be insufficient"
+            }
+            
+            $html += "<tr><td>Processors</td><td>Physical: $($hardwareInfo.NumberOfProcessors), Logical: $($hardwareInfo.NumberOfLogicalProcessors)</td><td>$processorStatus</td></tr>"
+            $html += "</table>"
+        }
+
+        # Disk Information with Advanced Filtering
+        $diskInfo = Invoke-SafeCommand -Command {
+            Get-WmiObject -Class Win32_LogicalDisk -Filter "DriveType=3" |
+            Select-Object DeviceID,
+                        @{Name="Size(GB)";Expression={[math]::Round($_.Size/1GB,2)}},
+                        @{Name="FreeSpace(GB)";Expression={[math]::Round($_.FreeSpace/1GB,2)}},
+                        @{Name="UsedSpace(GB)";Expression={[math]::Round(($_.Size - $_.FreeSpace)/1GB,2)}},
+                        @{Name="PercentFree";Expression={[math]::Round(($_.FreeSpace/$_.Size)*100,2)}}
+        } -Description "Disk Information" -Category "Storage"
+
+        if ($diskInfo) {
+            $html += "<h3>Disk Information</h3>"
+            $html += Get-SearchBox -TableId "diskTable" -InputId "diskSearch" -Columns @(
+                "Drive", "Total Size", "Free Space", "Used Space", "Percent Free", "Status"
+            )
+            
+            $html += "<table id='diskTable'>"
+            $html += "<tr><th onclick='sortTable(""diskTable"", 0)'>Drive</th>
+                         <th onclick='sortTable(""diskTable"", 1)'>Total Size (GB)</th>
+                         <th onclick='sortTable(""diskTable"", 2)'>Free Space (GB)</th>
+                         <th onclick='sortTable(""diskTable"", 3)'>Used Space (GB)</th>
+                         <th onclick='sortTable(""diskTable"", 4)'>Percent Free</th>
+                         <th onclick='sortTable(""diskTable"", 5)'>Status</th></tr>"
+
+            foreach ($disk in $diskInfo) {
+                $status = if ($disk.PercentFree -lt 10) {
+                    Get-StatusIndicator -Status "nonstandard" -Text "Low Space" -ToolTip "Disk space critically low"
+                } elseif ($disk.PercentFree -lt 20) {
+                    Get-StatusIndicator -Status "attention" -Text "Warning" -ToolTip "Disk space running low"
+                } else {
+                    Get-StatusIndicator -Status "standard" -Text "Normal" -ToolTip "Sufficient disk space"
+                }
+
+                $html += "<tr>"
+                $html += "<td>$($disk.DeviceID)</td>"
+                $html += "<td>$($disk.'Size(GB)')</td>"
+                $html += "<td>$($disk.'FreeSpace(GB)')</td>"
+                $html += "<td>$($disk.'UsedSpace(GB)')</td>"
+                $html += "<td>$($disk.PercentFree)%</td>"
+                $html += "<td>$status</td>"
+                $html += "</tr>"
+            }
+            
+            $html += "</table>"
+        }
+
+        # Enhanced BitLocker Status using manage-bde
+        $html += Get-BitLockerStatusTable
+
+        # Network Adapters
+        $networkInfo = Invoke-SafeCommand -Command {
+            Get-NetAdapter | Where-Object Status -eq "Up" |
+            Select-Object Name, InterfaceDescription, Status, LinkSpeed,
+                        @{Name="IPAddress";Expression={(Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4).IPAddress}
+                        }
+        } -Description "Network Information" -Category "Network"
+
+        if ($networkInfo) {
+            $html += "<h3>Network Configuration</h3>"
+            $html += Get-SearchBox -TableId "networkTable" -InputId "networkSearch" -Columns @(
+                "Name", "Description", "Status", "Speed", "IP Address"
+            )
+            
+            $html += "<table id='networkTable'>"
+            $html += "<tr><th onclick='sortTable(""networkTable"", 0)'>Name</th>
+                         <th onclick='sortTable(""networkTable"", 1)'>Description</th>
+                         <th onclick='sortTable(""networkTable"", 2)'>Status</th>
+                         <th onclick='sortTable(""networkTable"", 3)'>Speed</th>
+                         <th onclick='sortTable(""networkTable"", 4)'>IP Address</th></tr>"
+
+            foreach ($adapter in $networkInfo) {
+                $status = Get-StatusIndicator -Status "standard" -Text $adapter.Status -ToolTip "Network adapter is active"
+                
+                $html += "<tr>"
+                $html += "<td>$($adapter.Name)</td>"
+                $html += "<td>$($adapter.InterfaceDescription)</td>"
+                $html += "<td>$status</td>"
+                $html += "<td>$($adapter.LinkSpeed)</td>"
+                $html += "<td>$($adapter.IPAddress)</td>"
+                $html += "</tr>"
+            }
+            
+            $html += "</table>"
+        }
+
+        # Add legend at the end of the section
+        $html += "<div class='status-legend'>"
+        $html += "<h4>Status Indicators</h4>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "standard" -Text "Standard" -ToolTip "Meets standard requirements") + " Standard configuration</div>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "attention" -Text "Review" -ToolTip "May need attention") + " Needs review</div>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "nonstandard" -Text "Non-Standard" -ToolTip "Does not meet requirements") + " Non-standard configuration</div>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "information" -Text "Info" -ToolTip "Informational status") + " Information only</div>"
+        $html += "</div>"
+    }
+    catch {
+        Write-LogEntry "Error collecting system information: $($_.Exception.Message)" "ERROR" "SystemInfo"
+        $html += "<div class='error-log'>"
+        $html += "<p>Error collecting system information:</p>"
+        $html += "<pre>$($_.Exception.Message)</pre>"
+        $html += "</div>"
+    }
+
+    $html += "</div>" # End section
+    return $html
+}
+
+# Function to check user management and password policies
+function Get-UserManagement {
+    Write-LogEntry "Checking user management and password policies..." "INFO" "UserMgmt"
+    
+    $html = "<div class='section' id='users'><h2>User Management</h2>"
+    
+    try {
+        # Password Policy Check
+        $passwordPolicy = Invoke-SafeCommand -Command {
+            # Use secedit to get password policy in English
+            $tempFile = [System.IO.Path]::GetTempFileName()
+            secedit /export /cfg $tempFile /quiet
+            $content = Get-Content $tempFile
+            Remove-Item $tempFile -Force
+            
+            $policyInfo = @{}
+            foreach ($line in $content) {
+                if ($line -match "MinimumPasswordAge = (.*)") { $policyInfo["MinimumPasswordAge"] = $matches[1] }
+                if ($line -match "MaximumPasswordAge = (.*)") { $policyInfo["MaximumPasswordAge"] = $matches[1] }
+                if ($line -match "MinimumPasswordLength = (.*)") { $policyInfo["MinimumPasswordLength"] = $matches[1] }
+                if ($line -match "PasswordComplexity = (.*)") { $policyInfo["PasswordComplexity"] = $matches[1] }
+                if ($line -match "PasswordHistorySize = (.*)") { $policyInfo["PasswordHistorySize"] = $matches[1] }
+                if ($line -match "LockoutBadCount = (.*)") { $policyInfo["LockoutBadCount"] = $matches[1] }
+                if ($line -match "ResetLockoutCount = (.*)") { $policyInfo["ResetLockoutCount"] = $matches[1] }
+                if ($line -match "LockoutDuration = (.*)") { $policyInfo["LockoutDuration"] = $matches[1] }
+            }
+            return $policyInfo
+        } -Description "Password Policy" -Category "Security"
+
+        if ($passwordPolicy) {
+            $html += "<h3>Password Policy</h3>"
+            $html += "<table>"
+            $html += "<tr><th>Policy Setting</th><th>Current Value</th><th>Status</th><th>Standard Setting</th></tr>"
+
+            # Password Length
+            $lengthStatus = if ([int]$passwordPolicy.MinimumPasswordLength -ge 12) {
+                Get-StatusIndicator -Status "standard" -Text "Standard" -ToolTip "Meets password length requirement"
+            } elseif ([int]$passwordPolicy.MinimumPasswordLength -ge 8) {
+                Get-StatusIndicator -Status "attention" -Text "Review" -ToolTip "Consider increasing minimum length"
+            } else {
+                Get-StatusIndicator -Status "nonstandard" -Text "Non-Standard" -ToolTip "Below recommended length"
+            }
+            
+            $html += "<tr>"
+            $html += "<td>Minimum Password Length</td>"
+            $html += "<td>$($passwordPolicy.MinimumPasswordLength) characters</td>"
+            $html += "<td>$lengthStatus</td>"
+            $html += "<td>12 or more characters</td>"
+            $html += "</tr>"
+
+            # Password Complexity
+            $complexityStatus = if ($passwordPolicy.PasswordComplexity -eq 1) {
+                Get-StatusIndicator -Status "standard" -Text "Enabled" -ToolTip "Password complexity is enforced"
+            } else {
+                Get-StatusIndicator -Status "nonstandard" -Text "Disabled" -ToolTip "Password complexity should be enabled"
+            }
+            
+            $html += "<tr>"
+            $html += "<td>Password Complexity</td>"
+            $html += "<td>$($passwordPolicy.PasswordComplexity)</td>"
+            $html += "<td>$complexityStatus</td>"
+            $html += "<td>Enabled (1)</td>"
+            $html += "</tr>"
+
+            # Password Age
+            $maxAgeStatus = if ([int]$passwordPolicy.MaximumPasswordAge -le 90 -and [int]$passwordPolicy.MaximumPasswordAge -gt 0) {
+                Get-StatusIndicator -Status "standard" -Text "Standard" -ToolTip "Password expiry properly configured"
+            } elseif ([int]$passwordPolicy.MaximumPasswordAge -eq 0) {
+                Get-StatusIndicator -Status "nonstandard" -Text "Never Expires" -ToolTip "Passwords should expire"
+            } else {
+                Get-StatusIndicator -Status "attention" -Text "Review" -ToolTip "Password expiry period too long"
+            }
+            
+            $html += "<tr>"
+            $html += "<td>Maximum Password Age</td>"
+            $html += "<td>$($passwordPolicy.MaximumPasswordAge) days</td>"
+            $html += "<td>$maxAgeStatus</td>"
+            $html += "<td>90 days or less</td>"
+            $html += "</tr>"
+
+            # Password History
+            $historyStatus = if ([int]$passwordPolicy.PasswordHistorySize -ge 12) {
+                Get-StatusIndicator -Status "standard" -Text "Standard" -ToolTip "Adequate password history"
+            } else {
+                Get-StatusIndicator -Status "attention" -Text "Review" -ToolTip "Consider increasing history size"
+            }
+            
+            $html += "<tr>"
+            $html += "<td>Password History Size</td>"
+            $html += "<td>$($passwordPolicy.PasswordHistorySize) passwords</td>"
+            $html += "<td>$historyStatus</td>"
+            $html += "<td>12 or more passwords</td>"
+            $html += "</tr>"
+
+            # Account Lockout
+            $lockoutStatus = if ([int]$passwordPolicy.LockoutBadCount -gt 0 -and [int]$passwordPolicy.LockoutBadCount -le 5) {
+                Get-StatusIndicator -Status "standard" -Text "Standard" -ToolTip "Account lockout properly configured"
+            } elseif ([int]$passwordPolicy.LockoutBadCount -eq 0) {
+                Get-StatusIndicator -Status "nonstandard" -Text "Disabled" -ToolTip "Account lockout should be enabled"
+            } else {
+                Get-StatusIndicator -Status "attention" -Text "Review" -ToolTip "Lockout threshold might be too high"
+            }
+            
+            $html += "<tr>"
+            $html += "<td>Account Lockout Threshold</td>"
+            $html += "<td>$($passwordPolicy.LockoutBadCount) attempts</td>"
+            $html += "<td>$lockoutStatus</td>"
+            $html += "<td>5 attempts or less</td>"
+            $html += "</tr>"
+
+            $html += "</table>"
+        }
+
+# Local Users Analysis
+$localUsers = Invoke-SafeCommand -Command {
+    Get-LocalUser | Select-Object Name, Enabled, LastLogon, PasswordRequired,
+                                PasswordExpires, PasswordLastSet, Description,
+                                @{Name="IsAdmin";Expression={
+                                    $username = $_.Name
+                                    $adminGroup = Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue
+                                    $adminGroup.Name -contains $username
+                                }}
+} -Description "Local Users" -RequiresAdmin $true
+
+if ($localUsers) {
+    $html += "<h3>Local User Accounts</h3>"
+    $html += Get-SearchBox -TableId "userTable" -InputId "userSearch" -Columns @(
+        "Username", "Status", "Admin Rights", "Last Logon", "Inactive >90d", "Password Required", "Password Expires", "Description"
+    )
+    
+    $html += "<table id='userTable'>"
+    $html += "<tr>
+        <th onclick='sortTable(""userTable"", 0)'>Username</th>
+        <th onclick='sortTable(""userTable"", 1)'>Status</th>
+        <th onclick='sortTable(""userTable"", 2)'>Admin Rights</th>
+        <th onclick='sortTable(""userTable"", 3)'>Last Logon</th>
+        <th onclick='sortTable(""userTable"", 4)'>Inactive >90d</th>
+        <th onclick='sortTable(""userTable"", 5)'>Password Required</th>
+        <th onclick='sortTable(""userTable"", 6)'>Password Expires</th>
+        <th onclick='sortTable(""userTable"", 7)'>Description</th>
+    </tr>"
+
+    $inactiveDays = 90
+    $now = Get-Date
+    foreach ($user in $localUsers) {
+        $status = if ($user.Enabled) {
+            if ($user.Name -eq "Administrator") {
+                Get-StatusIndicator -Status "attention" -Text "Enabled" -ToolTip "Built-in Administrator account is enabled"
+            } elseif ($user.Name -eq "Guest") {
+                Get-StatusIndicator -Status "nonstandard" -Text "Enabled" -ToolTip "Guest account should be disabled"
+            } else {
+                Get-StatusIndicator -Status "standard" -Text "Enabled" -ToolTip "Account is active"
+            }
+        } else {
+            Get-StatusIndicator -Status "standard" -Text "Disabled" -ToolTip "Account is disabled"
+        }
+
+        $adminRights = if ($user.IsAdmin) {
+            Get-StatusIndicator -Status "attention" -Text "Yes" -ToolTip "User has administrative rights"
+        } else {
+            Get-StatusIndicator -Status "standard" -Text "No" -ToolTip "Standard user account"
+        }
+
+        $passwordStatus = if ($user.PasswordRequired) {
+            Get-StatusIndicator -Status "standard" -Text "Required" -ToolTip "Password is required"
+        } else {
+            Get-StatusIndicator -Status "nonstandard" -Text "Not Required" -ToolTip "Password should be required"
+        }
+
+        # NOVO: Coluna de Inatividade
+        $inactiveStatus = ""
+        if ($user.Enabled -and $user.LastLogon) {
+            $days = ($now - $user.LastLogon).Days
+            if ($days -ge $inactiveDays) {
+                $inactiveStatus = Get-StatusIndicator -Status "attention" -Text "Inactive" -ToolTip "No Login for $days"
+            } else {
+                $inactiveStatus = Get-StatusIndicator -Status "standard" -Text "Active" -ToolTip "Last Login $days ago"
+            }
+        } elseif ($user.Enabled -and -not $user.LastLogon) {
+            $inactiveStatus = Get-StatusIndicator -Status "information" -Text "Never logged in" -ToolTip "Account never used"
+        } else {
+            $inactiveStatus = Get-StatusIndicator -Status "standard" -Text "-" -ToolTip "Account Disabled"
+        }
+
+        $html += "<tr>"
+        $html += "<td>$($user.Name)</td>"
+        $html += "<td>$status</td>"
+        $html += "<td>$adminRights</td>"
+        $html += "<td>$(if ($user.LastLogon) { $user.LastLogon.ToString('yyyy-MM-dd HH:mm:ss') } else { 'Never' })</td>"
+        $html += "<td>$inactiveStatus</td>"
+        $html += "<td>$passwordStatus</td>"
+        $html += "<td>$($user.PasswordExpires)</td>"
+        $html += "<td>$($user.Description)</td>"
+        $html += "</tr>"
+    }
+    $html += "</table>"
+}
+
+        # Local Groups Analysis
+        $localGroups = Invoke-SafeCommand -Command {
+            Get-LocalGroup | Select-Object Name, Description
+        } -Description "Local Groups" -RequiresAdmin $true
+
+        if ($localGroups) {
+            $html += "<h3>Local Groups and Members</h3>"
+            $html += Get-SearchBox -TableId "groupTable" -InputId "groupSearch" -Columns @(
+                "Group Name", "Description", "Members", "Type"
+            )
+            
+            $html += "<table id='groupTable'>"
+            $html += "<tr><th onclick='sortTable(""groupTable"", 0)'>Group Name</th>
+                         <th onclick='sortTable(""groupTable"", 1)'>Description</th>
+                         <th onclick='sortTable(""groupTable"", 2)'>Members</th>
+                         <th onclick='sortTable(""groupTable"", 3)'>Type</th></tr>"
+
+            foreach ($group in $localGroups) {
+                $members = Invoke-SafeCommand -Command {
+                    Get-LocalGroupMember -Group $group.Name -ErrorAction SilentlyContinue |
+                    Select-Object Name, PrincipalSource
+                } -Description "Group Members: $($group.Name)"
+
+                $memberList = if ($members) {
+                    $members | ForEach-Object {
+                        $memberType = if ($_.PrincipalSource -eq "Local") {
+                            Get-StatusIndicator -Status "attention" -Text "Local" -ToolTip "Local account member"
+                        } else {
+                            Get-StatusIndicator -Status "standard" -Text "Domain" -ToolTip "Domain account member"
+                        }
+                        "$($_.Name) ($memberType)"
+                    }
+                } else {
+                    "No members"
+                }
+
+                $groupType = switch ($group.Name) {
+                    "Administrators" { Get-StatusIndicator -Status "attention" -Text "Administrative" -ToolTip "Administrative access group" }
+                    "Backup Operators" { Get-StatusIndicator -Status "attention" -Text "Privileged" -ToolTip "Privileged access group" }
+                    "Power Users" { Get-StatusIndicator -Status "attention" -Text "Privileged" -ToolTip "Privileged access group" }
+                    default { Get-StatusIndicator -Status "standard" -Text "Standard" -ToolTip "Standard user group" }
+                }
+
+                $html += "<tr>"
+                $html += "<td>$($group.Name)</td>"
+                $html += "<td>$($group.Description)</td>"
+                $html += "<td>$($memberList -join '<br>')</td>"
+                $html += "<td>$groupType</td>"
+                $html += "</tr>"
+            }
+            
+            $html += "</table>"
+        }
+
+        # Add legend at the end of the section
+        $html += "<div class='status-legend'>"
+        $html += "<h4>Status Indicators</h4>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "standard" -Text "Standard" -ToolTip "Meets standard requirements") + " Standard configuration</div>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "attention" -Text "Review" -ToolTip "May need attention") + " Needs review</div>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "nonstandard" -Text "Non-Standard" -ToolTip "Does not meet requirements") + " Non-standard configuration</div>"
+        $html += "</div>"
+    }
+    catch {
+        Write-LogEntry "Error checking user management: $($_.Exception.Message)" "ERROR" "UserMgmt"
+        $html += "<div class='error-log'>"
+        $html += "<p>Error checking user management:</p>"
+        $html += "<pre>$($_.Exception.Message)</pre>"
+        $html += "</div>"
+    }
+
+    $html += "</div>" # End section
+    return $html
+}
+
+# Function to check network security and connectivity
+function Get-NetworkSecurity {
+    param(
+        [switch]$SkipConnectivityTests = $false,
+        [int]$ConnectionTimeout = 5
+    )
+    
+    Write-LogEntry "Checking network security configuration..." "INFO" "Network"
+    
+    $html = "<div class='section' id='network'><h2>Network Security</h2>"
+    
+    try {
+        # Windows Firewall Status
+        $firewallProfiles = Invoke-SafeCommand -Command {
+            Get-NetFirewallProfile | Select-Object Name, Enabled, DefaultInboundAction, DefaultOutboundAction
+        } -Description "Windows Firewall Status" -Category "Security"
+
+        if ($firewallProfiles) {
+            $html += "<h3>Windows Firewall Status</h3>"
+            $html += "<table><tr><th>Profile</th><th>Status</th><th>Inbound Default</th><th>Outbound Default</th><th>Compliance</th></tr>"
+            
+            foreach ($profile in $firewallProfiles) {
+                $status = if ($profile.Enabled) {
+                    Get-StatusIndicator -Status "standard" -Text "Enabled" -ToolTip "Firewall profile is active"
+                } else {
+                    Get-StatusIndicator -Status "nonstandard" -Text "Disabled" -ToolTip "Firewall profile should be enabled"
+                }
+                
+                $compliance = if ($profile.Enabled -and $profile.DefaultInboundAction -eq "Block") {
+                    Get-StatusIndicator -Status "standard" -Text "Compliant" -ToolTip "Proper firewall configuration"
+                } else {
+                    Get-StatusIndicator -Status "nonstandard" -Text "Review Required" -ToolTip "Firewall configuration needs review"
+                }
+                
+                $html += "<tr>"
+                $html += "<td>$($profile.Name)</td>"
+                $html += "<td>$status</td>"
+                $html += "<td>$($profile.DefaultInboundAction)</td>"
+                $html += "<td>$($profile.DefaultOutboundAction)</td>"
+                $html += "<td>$compliance</td>"
+                $html += "</tr>"
+            }
+            $html += "</table>"
+        }
+
+        # Security Tool Connectivity (Optional with timeout)
+        if (-not $SkipConnectivityTests) {
+            $html += "<h3>Security Infrastructure Connectivity</h3>"
+            $html += "<div class='info-box'><p>Testing connectivity to security infrastructure (timeout: ${ConnectionTimeout}s per test)</p></div>"
+            
+            # Simplified security solutions list (remove internal details)
+            $securitySolutions = @(
+                @{ Name = "Security Monitoring"; Host = "security-mon.local"; Port = 8089 }
+                @{ Name = "Update Management"; Host = "update-mgmt.local"; Port = 80 }
+                @{ Name = "Endpoint Protection"; Host = "endpoint-sec.local"; Port = 443 }
+                @{ Name = "Vulnerability Scanner"; Host = "vuln-scan.local"; Port = 8834 }
+            )
+            
+            $html += "<table><tr><th>Service</th><th>Status</th><th>Response Time</th><th>Notes</th></tr>"
+            
+            foreach ($solution in $securitySolutions) {
+                $testResult = Invoke-SafeCommand -Command {
+                    $result = Test-NetConnection -ComputerName $solution.Host -Port $solution.Port -WarningAction SilentlyContinue -InformationLevel Quiet
+                    return @{
+                        Success = $result.TcpTestSucceeded
+                        ResponseTime = if ($result.PingReplyDetails) { $result.PingReplyDetails.RoundtripTime } else { 0 }
+                    }
+                } -Description "$($solution.Name) Connectivity" -Category "Security"
+                
+                if ($testResult) {
+                    $status = if ($testResult.Success) {
+                        Get-StatusIndicator -Status "standard" -Text "Connected" -ToolTip "Connection successful"
+                    } else {
+                        Get-StatusIndicator -Status "attention" -Text "No Connection" -ToolTip "Unable to connect - may be expected in some network configurations"
+                    }
+                    $responseTime = if ($testResult.ResponseTime -gt 0) { "$($testResult.ResponseTime)ms" } else { "N/A" }
+                    $notes = if (-not $testResult.Success) { "Connection blocked or service unavailable" } else { "Service reachable" }
+                } else {
+                    $status = Get-StatusIndicator -Status "information" -Text "Timeout" -ToolTip "Connection test timed out"
+                    $responseTime = "> ${ConnectionTimeout}s"
+                    $notes = "Connection test timed out"
+                }
+                
+                $html += "<tr>"
+                $html += "<td>$($solution.Name)</td>"
+                $html += "<td>$status</td>"
+                $html += "<td>$responseTime</td>"
+                $html += "<td>$notes</td>"
+                $html += "</tr>"
+            }
+            $html += "</table>"
+        } else {
+            $html += "<div class='info-box'><p>Security infrastructure connectivity tests skipped (use -SkipConnectivityTests `$false to enable)</p></div>"
+        }
+
+        # Network Interfaces (Basic Info Only)
+        $networkAdapters = Invoke-SafeCommand -Command {
+            Get-NetAdapter | Where-Object Status -eq "Up" | Select-Object Name, InterfaceDescription, LinkSpeed
+        } -Description "Network Adapters" -Category "Network"
+
+        if ($networkAdapters) {
+            $html += "<h3>Active Network Interfaces</h3>"
+            $html += "<table><tr><th>Interface</th><th>Description</th><th>Speed</th><th>Status</th></tr>"
+            
+            foreach ($adapter in $networkAdapters) {
+                $html += "<tr>"
+                $html += "<td>$(ConvertTo-SafeHtml $adapter.Name)</td>"
+                $html += "<td>$(ConvertTo-SafeHtml $adapter.InterfaceDescription)</td>"
+                $html += "<td>$($adapter.LinkSpeed)</td>"
+                $html += "<td>" + (Get-StatusIndicator -Status "standard" -Text "Active") + "</td>"
+                $html += "</tr>"
+            }
+            $html += "</table>"
+        }
+    }
+    catch {
+        Write-LogEntry "Error checking network security: $($_.Exception.Message)" "ERROR" "Network"
+        $html += "<div class='error-log'><p>Error checking network configuration.</p></div>"
+    }
+
+    $html += "</div>" # End section
+    return $html
+}
+
+# Function to check time synchronization and services
+function Get-TimeAndServices {
+    Write-LogEntry "Checking time synchronization and services..." "INFO" "TimeServices"
+    
+    $html = "<div class='section' id='time'><h2>Time Configuration and Services</h2>"
+    
+    try {
+        # Time Zone Information
+        $timeZoneInfo = Invoke-SafeCommand -Command {
+            Get-TimeZone | Select-Object Id, DisplayName, BaseUtcOffset
+        } -Description "Time Zone Information" -Category "Time"
+
+        if ($timeZoneInfo) {
+            $html += "<h3>Time Zone Configuration</h3>"
+            $html += "<table>"
+            $html += "<tr><th>Setting</th><th>Value</th><th>Status</th></tr>"
+
+            $html += "<tr>"
+            $html += "<td>Time Zone</td>"
+            $html += "<td>$($timeZoneInfo.DisplayName)</td>"
+            $html += "<td>" + (Get-StatusIndicator -Status "information" -Text "Configured" -ToolTip "Current time zone setting") + "</td>"
+            $html += "</tr>"
+
+            $html += "<tr>"
+            $html += "<td>UTC Offset</td>"
+            $html += "<td>$($timeZoneInfo.BaseUtcOffset)</td>"
+            $html += "<td>" + (Get-StatusIndicator -Status "information" -Text "Configured" -ToolTip "Current UTC offset") + "</td>"
+            $html += "</tr>"
+            
+            $html += "</table>"
+        }
+
+        # NTP Configuration - Force English output
+        $html += "<h3>Time Synchronization (NTP)</h3>"
+        
+        # Get NTP Status with English output
+        $ntpStatus = Invoke-SafeCommand -Command {
+            # Set culture to English temporarily
+            $currentCulture = [System.Threading.Thread]::CurrentThread.CurrentUICulture
+            [System.Threading.Thread]::CurrentThread.CurrentUICulture = 'en-US'
+            
+            $output = w32tm /query /status /verbose
+            
+            # Restore original culture
+            [System.Threading.Thread]::CurrentThread.CurrentUICulture = $currentCulture
+            
+            return $output
+        } -Description "NTP Status" -Category "Time"
+
+        if ($ntpStatus) {
+            # Parse NTP Status
+            $ntpInfo = @{}
+            $ntpStatus | ForEach-Object {
+                if ($_ -match '^Leap Indicator: (.+)$') { $ntpInfo['LeapIndicator'] = $matches[1] }
+                if ($_ -match '^Stratum: (.+)$') { $ntpInfo['Stratum'] = $matches[1] }
+                if ($_ -match '^Reference ID: (.+)$') { $ntpInfo['ReferenceID'] = $matches[1] }
+                if ($_ -match '^Last Successful Sync Time: (.+)$') { $ntpInfo['LastSync'] = $matches[1] }
+                if ($_ -match '^Source: (.+)$') { $ntpInfo['Source'] = $matches[1] }
+                if ($_ -match '^Phase Offset: (.+)$') { $ntpInfo['PhaseOffset'] = $matches[1] }
+                if ($_ -match '^Root Delay: (.+)$') { $ntpInfo['RootDelay'] = $matches[1] }
+                if ($_ -match '^Root Dispersion: (.+)$') { $ntpInfo['RootDispersion'] = $matches[1] }
+            }
+
+            $html += "<table>"
+            $html += "<tr><th>Setting</th><th>Value</th><th>Status</th></tr>"
+
+            # NTP Source
+            $sourceStatus = if ($ntpInfo['Source']) {
+                Get-StatusIndicator -Status "standard" -Text "Configured" -ToolTip "NTP source is configured"
+            } else {
+                Get-StatusIndicator -Status "attention" -Text "Not Configured" -ToolTip "NTP source should be configured"
+            }
+            
+            $html += "<tr>"
+            $html += "<td>NTP Source</td>"
+            $html += "<td>$($ntpInfo['Source'])</td>"
+            $html += "<td>$sourceStatus</td>"
+            $html += "</tr>"
+
+            # Last Sync Time
+            $lastSyncStatus = if ($ntpInfo['LastSync']) {
+                try {
+                    $syncTime = [DateTime]::Parse($ntpInfo['LastSync'])
+                    $syncAge = (Get-Date) - $syncTime
+                    if ($syncAge.TotalHours -lt 24) {
+                        Get-StatusIndicator -Status "standard" -Text "Recent" -ToolTip "Last sync within 24 hours"
+                    } else {
+                        Get-StatusIndicator -Status "attention" -Text "Old" -ToolTip "Last sync more than 24 hours ago"
+                    }
+                } catch {
+                    Get-StatusIndicator -Status "attention" -Text "Unknown" -ToolTip "Unable to parse sync time"
+                }
+            } else {
+                Get-StatusIndicator -Status "attention" -Text "No Sync" -ToolTip "No synchronization recorded"
+            }
+            
+            $html += "<tr>"
+            $html += "<td>Last Sync Time</td>"
+            $html += "<td>$($ntpInfo['LastSync'])</td>"
+            $html += "<td>$lastSyncStatus</td>"
+            $html += "</tr>"
+
+            # Stratum
+            $stratumStatus = if ($ntpInfo['Stratum'] -match '^\d+$') {
+                $stratum = [int]($ntpInfo['Stratum'])
+                if ($stratum -le 3) {
+                    Get-StatusIndicator -Status "standard" -Text "Good" -ToolTip "Stratum $stratum is acceptable"
+                } else {
+                    Get-StatusIndicator -Status "attention" -Text "Review" -ToolTip "High stratum level"
+                }
+            } else {
+                Get-StatusIndicator -Status "attention" -Text "Unknown" -ToolTip "Unable to determine stratum"
+            }
+            
+            $html += "<tr>"
+            $html += "<td>Stratum</td>"
+            $html += "<td>$($ntpInfo['Stratum'])</td>"
+            $html += "<td>$stratumStatus</td>"
+            $html += "</tr>"
+
+            # Additional NTP Information
+            foreach ($key in @('LeapIndicator', 'ReferenceID', 'RootDelay', 'RootDispersion')) {
+                if ($ntpInfo[$key]) {
+                    $html += "<tr>"
+                    $html += "<td>$key</td>"
+                    $html += "<td>$($ntpInfo[$key])</td>"
+                    $html += "<td>" + (Get-StatusIndicator -Status "information" -Text "Info" -ToolTip "Informational value") + "</td>"
+                    $html += "</tr>"
+                }
+            }
+            
+            $html += "</table>"
+        }
+
+        # Windows Time Service Configuration
+        $timeService = Invoke-SafeCommand -Command {
+            Get-Service -Name "W32Time" | Select-Object Status, StartType
+        } -Description "Windows Time Service" -Category "Services"
+
+        if ($timeService) {
+            $html += "<h3>Windows Time Service</h3>"
+            $html += "<table>"
+            $html += "<tr><th>Setting</th><th>Value</th><th>Status</th></tr>"
+
+            # Service Status
+            $serviceStatus = switch ($timeService.Status) {
+                "Running" { Get-StatusIndicator -Status "standard" -Text "Running" -ToolTip "Service is running" }
+                "Stopped" { Get-StatusIndicator -Status "nonstandard" -Text "Stopped" -ToolTip "Service should be running" }
+                default { Get-StatusIndicator -Status "attention" -Text $timeService.Status -ToolTip "Unexpected service status" }
+            }
+            
+            $html += "<tr>"
+            $html += "<td>Service Status</td>"
+            $html += "<td>$($timeService.Status)</td>"
+            $html += "<td>$serviceStatus</td>"
+            $html += "</tr>"
+
+            # Start Type
+            $startTypeStatus = switch ($timeService.StartType) {
+                "Automatic" { Get-StatusIndicator -Status "standard" -Text "Automatic" -ToolTip "Service starts automatically" }
+                "Manual" { Get-StatusIndicator -Status "attention" -Text "Manual" -ToolTip "Service should be set to automatic" }
+                "Disabled" { Get-StatusIndicator -Status "nonstandard" -Text "Disabled" -ToolTip "Service should not be disabled" }
+                default { Get-StatusIndicator -Status "attention" -Text $timeService.StartType -ToolTip "Unexpected start type" }
+            }
+            
+            $html += "<tr>"
+            $html += "<td>Start Type</td>"
+            $html += "<td>$($timeService.StartType)</td>"
+            $html += "<td>$startTypeStatus</td>"
+            $html += "</tr>"
+            
+            $html += "</table>"
+        }
+
+        # Add legend at the end of the section
+        $html += "<div class='status-legend'>"
+        $html += "<h4>Status Indicators</h4>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "standard" -Text "Success") + " Service is running or configured as expected</div>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "nonstandard" -Text "Error") + " Service stopped or not found, which is a compliance violation for required services</div>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "attention" -Text "Review") + " A service set to start automatically is not running</div>"
+        $html += "</div>"
+    }
+    catch {
+        Write-LogEntry "Error checking time configuration: $($_.Exception.Message)" "ERROR" "TimeServices"
+        $html += "<div class='error-log'>"
+        $html += "<p>Error checking time configuration:</p>"
+        $html += "<pre>$($_.Exception.Message)</pre>"
+        $html += "</div>"
+    }
+
+    $html += "</div>" # End section
+    return $html
+}
+
+function Get-EventLogStatus {
+    Write-LogEntry "Checking event logs and monitoring..." "INFO" "EventLogs"
+
+    $html = @"
+### Event Logs and System Monitoring
+
+"@
+
+    try {
+        # Event Log Service Status
+        $eventLogService = Invoke-SafeCommand -Command {
+            Get-Service -Name 'EventLog' | Select-Object Status, StartType
+        } -Description 'Event Log Service' -Category 'Logging'
+
+        if ($eventLogService) {
+            $html += @"
+#### Event Log Service Status
+
+<table>
+<tr><th>Setting</th><th>Value</th><th>Status</th></tr>
+"@
+
+            $serviceStatus = switch ($eventLogService.Status) {
+                'Running' { Get-StatusIndicator -Status 'standard'   -Text 'Running'  -ToolTip 'Service is running properly' }
+                'Stopped' { Get-StatusIndicator -Status 'nonstandard' -Text 'Stopped'  -ToolTip 'Service should be running' }
+                default   { Get-StatusIndicator -Status 'attention'   -Text $eventLogService.Status -ToolTip 'Unexpected service status' }
+            }
+
+            $startTypeStatus = switch ($eventLogService.StartType) {
+                'Automatic' { Get-StatusIndicator -Status 'standard'   -Text 'Automatic' -ToolTip 'Service starts automatically' }
+                default     { Get-StatusIndicator -Status 'nonstandard' -Text $eventLogService.StartType -ToolTip 'Should be set to Automatic' }
+            }
+
+            $html += "<tr><td>Service Status</td><td>$($eventLogService.Status)</td><td>$serviceStatus</td></tr>"
+            $html += "<tr><td>Start Type</td><td>$($eventLogService.StartType)</td><td>$startTypeStatus</td></tr>"
+            $html += "</table>`n"
+        }
+
+        # Event Log Configurations
+        $eventLogs = Invoke-SafeCommand -Command {
+            Get-WinEvent -ListLog * -ErrorAction SilentlyContinue |
+            Where-Object { $_.RecordCount -gt 0 } |
+            Select-Object LogName,
+                          IsEnabled,
+                          LogMode,
+                          MaximumSizeInBytes,
+                          RecordCount,
+                          @{Name='LastWriteTime';Expression={$_.LastWriteTime}},
+                          @{Name='SizeInMB';Expression={[math]::Round($_.FileSize/1MB, 2)}}
+        } -Description 'Event Logs Configuration' -Category 'Logging'
+
+        if ($eventLogs) {
+            $html += @"
+#### Event Log Configurations
+
+<strong>Note:</strong> Only essential event logs required for IRM compliance are displayed below.
+"@
+
+            # Search box
+            $html += Get-SearchBox -TableId 'eventLogTable' -InputId 'eventLogSearch' -Columns @(
+                'Log Name','Status','Records','Size (MB)','Maximum Size (MB)','Retention Mode','Last Write'
+            )
+
+            $html += @"
+<table id='eventLogTable'>
+<tr>
+  <th>Log Name</th>
+  <th>Status</th>
+  <th>Records</th>
+  <th>Size (MB)</th>
+  <th>Maximum Size (MB)</th>
+  <th>Retention Mode</th>
+  <th>Last Write</th>
+</tr>
+"@
+
+            # Essential logs
+            $essentialLogs = @(
+                'System',
+                'Security',
+                'Application',
+                'Windows PowerShell',
+                'Microsoft-Windows-PowerShell/Operational',
+                'Microsoft-Windows-Windows Defender/Operational',
+                'Microsoft-Windows-Windows Firewall With Advanced Security/Firewall'
+            )
+
+            foreach ($log in $eventLogs) {
+                if ($essentialLogs -contains $log.LogName) {
+                    $rowClass = " class='mandatory'"
+
+                    $status = if ($log.IsEnabled) {
+                        Get-StatusIndicator -Status 'standard'   -Text 'Enabled'  -ToolTip 'Log is enabled and collecting events'
+                    } else {
+                        Get-StatusIndicator -Status 'nonstandard' -Text 'Disabled' -ToolTip 'Log should be enabled'
+                    }
+
+                    $sizeStatus = if ($log.SizeInMB -gt ($log.MaximumSizeInBytes/1MB * 0.9)) {
+                        Get-StatusIndicator -Status 'attention' -Text "$($log.SizeInMB) MB" -ToolTip 'Log is nearly full'
+                    } else {
+                        "$($log.SizeInMB) MB"
+                    }
+
+                    $retentionStatus = switch ($log.LogMode) {
+                        'Circular' { Get-StatusIndicator -Status 'standard'    -Text 'Circular' -ToolTip 'Old events are overwritten when log is full' }
+                        'Retain'   { Get-StatusIndicator -Status 'attention'   -Text 'Retain'   -ToolTip 'Events are retained but log may fill up' }
+                        default    { Get-StatusIndicator -Status 'information' -Text $log.LogMode -ToolTip 'Custom retention mode' }
+                    }
+
+                    $html += "<tr$rowClass>"
+                    $html += "<td>$($log.LogName)</td>"
+                    $html += "<td>$status</td>"
+                    $html += "<td>$($log.RecordCount)</td>"
+                    $html += "<td>$sizeStatus</td>"
+                    $html += "<td>$([math]::Round($log.MaximumSizeInBytes/1MB, 2)) MB</td>"
+                    $html += "<td>$retentionStatus</td>"
+                    $html += "<td>$($log.LastWriteTime)</td>"
+                    $html += "</tr>"
+                }
+            }
+
+            $html += "</table>`n"
+        }
+
+        # Recent Critical Events (Simplified - No Message Content)
+        $criticalEvents = Invoke-SafeCommand -Command {
+            $events = @()
+            $filters = @(
+                @{LogName='System';     Level=1; ID=1,6008,6009,41}, # critical system events
+                @{LogName='Security';           ID=4625,4740},       # failed logons & lockouts
+                @{LogName='Application'; Level=1}                     # critical app events
+            )
+            foreach ($filter in $filters) {
+                try {
+                    $events += Get-WinEvent -FilterHashtable $filter -MaxEvents 5 -ErrorAction SilentlyContinue
+                } catch { }
+            }
+            $events | Sort-Object TimeCreated -Descending | Select-Object -First 10
+        } -Description 'Critical Events' -Category 'Events'
+
+        if ($criticalEvents -and $criticalEvents.Count -gt 0) {
+            $html += @"
+#### Recent Critical Events (Last 10)
+
+<div class='info-box'><p>Only showing the most critical system events. Message content hidden for security. Event details available through standard logging tools.</p></div>
+<table id='criticalEventTable'>
+<tr><th>Time</th><th>Log</th><th>Event ID</th><th>Level</th><th>Provider</th></tr>
+"@
+
+            foreach ($evt in $criticalEvents) {
+                $levelStatus = switch ($evt.Level) {
+                    1 { Get-StatusIndicator -Status 'nonstandard' -Text 'Critical' -ToolTip 'Critical system event' }
+                    2 { Get-StatusIndicator -Status 'attention'   -Text 'Error'    -ToolTip 'Error event' }
+                    default { Get-StatusIndicator -Status 'information' -Text 'Info' -ToolTip 'Informational event' }
+                }
+
+                $providerName = if ($evt.ProviderName) { $evt.ProviderName } else { 'Unknown' }
+                $timeText = if ($evt.TimeCreated) { $evt.TimeCreated.ToString('MM-dd HH:mm') } else { '-' }
+
+                $html += "<tr>"
+                $html += "<td>$timeText</td>"
+                $html += "<td>$($evt.LogName)</td>"
+                $html += "<td>$($evt.Id)</td>"
+                $html += "<td>$levelStatus</td>"
+                $html += "<td>$providerName</td>"
+                $html += "</tr>"
+            }
+
+            $html += "</table>`n"
+        } else {
+            $html += @"
+#### Recent Critical Events
+
+<div class='info-box'><p>No critical events found in recent logs.</p></div>
+"@
+        }
+    } # <-- FECHA o try aqui
+
+    catch {
+        Write-LogEntry "Error checking event logs: $($_.Exception.Message)" "ERROR" "EventLogs"
+        $html += "<div class='error-log'><p>Error checking event logs:</p><pre>$($_.Exception.Message)</pre></div>"
+    }
+
+    $html += "`n" # End section
+    return $html
+}
+
+# Function to check installed software and system updates
+function Get-SoftwareAndUpdates {
+    Write-LogEntry "Checking installed software and system updates..." "INFO" "Software"
+    
+    $html = "<div class='section' id='updates'><h2>Software Management and System Updates</h2>"
+    
+    try {
+        # Installed Software with Advanced Filtering
+        $installedSoftware = Invoke-SafeCommand -Command {
+            $software = @()
+            
+            # Method 1: Registry 32-bit
+            $software += Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* |
+                Where-Object { $_.DisplayName -and $_.DisplayName -notmatch "^(KB|Update|Security Update)" } |
+                Select-Object DisplayName, DisplayVersion, Publisher, InstallDate,
+                            @{Name="Source";Expression={"32-bit"}},
+                            @{Name="EstimatedSize";Expression={[math]::Round($_.EstimatedSize/1024, 2)}}
+
+            # Method 2: Registry 64-bit
+            $software += Get-ItemProperty HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* |
+                Where-Object { $_.DisplayName -and $_.DisplayName -notmatch "^(KB|Update|Security Update)" } |
+                Select-Object DisplayName, DisplayVersion, Publisher, InstallDate,
+                            @{Name="Source";Expression={"64-bit"}},
+                            @{Name="EstimatedSize";Expression={[math]::Round($_.EstimatedSize/1024, 2)}}
+
+            return $software | Sort-Object DisplayName
+        } -Description "Installed Software" -Category "Software"
+
+        if ($installedSoftware) {
+            $html += "<h3>Installed Software</h3>"
+            
+            # Add explanation for mandatory software
+            $html += "<div class='info-box'>"
+            $html += "<p>The following software list includes all installed applications. Required software is highlighted and marked accordingly.</p>"
+            $html += "</div>"
+
+            # Add search and filter controls
+            $html += Get-SearchBox -TableId "softwareTable" -InputId "softwareSearch" -Columns @(
+                "Name", "Version", "Publisher", "Install Date", "Size (MB)", "Type", "Status"
+            )
+
+            $html += "<table id='softwareTable'>"
+            $html += "<tr><th onclick='sortTable(""softwareTable"", 0)'>Name</th>
+                         <th onclick='sortTable(""softwareTable"", 1)'>Version</th>
+                         <th onclick='sortTable(""softwareTable"", 2)'>Publisher</th>
+                         <th onclick='sortTable(""softwareTable"", 3)'>Install Date</th>
+                         <th onclick='sortTable(""softwareTable"", 4)'>Size (MB)</th>
+                         <th onclick='sortTable(""softwareTable"", 5)'>Type</th>
+                         <th onclick='sortTable(""softwareTable"", 6)'>Status</th></tr>"
+
+            foreach ($software in $installedSoftware) {
+                $isMandatory = $global:standardSoftware.Keys -contains $software.DisplayName
+                $softwareCategory = if ($isMandatory) { $global:standardSoftware[$software.DisplayName].Category } else { "" }
+                $rowClass = if ($isMandatory) { " class='mandatory'" } else { "" }
+
+                $installDate = if ($software.InstallDate) {
+                    try {
+                        [datetime]::ParseExact($software.InstallDate, "yyyyMMdd", $null).ToString("yyyy-MM-dd")
+                    } catch {
+                        $software.InstallDate
+                    }
+                } else {
+                    "Unknown"
+                }
+
+                $status = if ($isMandatory) {
+                    Get-StatusIndicator -Status "standard" -Text "Required" -ToolTip "Required software for $softwareCategory"
+                } elseif ($software.Publisher -match "Microsoft|Novo Nordisk") {
+                    Get-StatusIndicator -Status "standard" -Text "Verified" -ToolTip "Software from trusted publisher"
+                } elseif (!$software.Publisher) {
+                    Get-StatusIndicator -Status "attention" -Text "Unknown" -ToolTip "Unknown publisher - review required"
+                } else {
+                    Get-StatusIndicator -Status "information" -Text "Optional" -ToolTip "Non-standard software"
+                }
+
+                $html += "<tr$rowClass>"
+                $html += "<td>$($software.DisplayName)</td>"
+                $html += "<td>$($software.DisplayVersion)</td>"
+                $html += "<td>$($software.Publisher)</td>"
+                $html += "<td>$installDate</td>"
+                $html += "<td>$($software.EstimatedSize)</td>"
+                $html += "<td>$($software.Source)</td>"
+                $html += "<td>$status</td>"
+                $html += "</tr>"
+            }
+
+            $html += "</table>"
+
+            # Software Statistics
+            $totalSoftware = $installedSoftware.Count
+            $mandatorySoftware = ($installedSoftware | Where-Object { $global:standardSoftware.Keys -contains $_.DisplayName }).Count
+            $verifiedSoftware = ($installedSoftware | Where-Object { $_.Publisher -match "Microsoft|Novo Nordisk" }).Count
+            $unknownSoftware = ($installedSoftware | Where-Object { !$_.Publisher }).Count
+
+            $html += "<div class='summary-box'>"
+            $html += "<div class='summary-item'><h3>$totalSoftware</h3><p>Total Applications</p></div>"
+            $html += "<div class='summary-item'><h3>$mandatorySoftware</h3><p>Required Software</p></div>"
+            $html += "<div class='summary-item'><h3>$verifiedSoftware</h3><p>Verified Publishers</p></div>"
+            $html += "<div class='summary-item'><h3>$unknownSoftware</h3><p>Unknown Publishers</p></div>"
+            $html += "</div>"
+        }
+
+        # Windows Updates
+        $html += "<h3>System Updates</h3>"
+
+        # Update Service Status
+        $updateService = Invoke-SafeCommand -Command {
+            Get-Service -Name "wuauserv" | Select-Object Status, StartType
+        } -Description "Windows Update Service" -Category "Updates"
+
+        if ($updateService) {
+            $html += "<h4>Windows Update Service Status</h4>"
+            $html += "<table>"
+            $html += "<tr><th>Setting</th><th>Value</th><th>Status</th></tr>"
+
+            $serviceStatus = switch ($updateService.Status) {
+                "Running" { Get-StatusIndicator -Status "standard" -Text "Running" -ToolTip "Service is running properly" }
+                "Stopped" { Get-StatusIndicator -Status "nonstandard" -Text "Stopped" -ToolTip "Service should be running" }
+                default { Get-StatusIndicator -Status "attention" -Text $updateService.Status -ToolTip "Unexpected service status" }
+            }
+
+            $startType = switch ($updateService.StartType) {
+                "Automatic" { Get-StatusIndicator -Status "standard" -Text "Automatic" -ToolTip "Service starts automatically" }
+                default { Get-StatusIndicator -Status "attention" -Text $updateService.StartType -ToolTip "Should be set to Automatic" }
+            }
+
+            $html += "<tr><td>Service Status</td><td>$($updateService.Status)</td><td>$serviceStatus</td></tr>"
+            $html += "<tr><td>Start Type</td><td>$($updateService.StartType)</td><td>$startType</td></tr>"
+            $html += "</table>"
+        }
+
+        # Installed Updates
+        $updates = Invoke-SafeCommand -Command {
+            Get-HotFix | Sort-Object InstalledOn -Descending
+        } -Description "Installed Updates" -Category "Updates"
+
+        if ($updates) {
+            $html += "<h4>Installed Updates</h4>"
+            
+            # Add search and filter controls
+            $html += Get-SearchBox -TableId "updatesTable" -InputId "updatesSearch" -Columns @(
+                "KB Number", "Type", "Installed On", "Installed By", "Description"
+            )
+
+            $html += "<table id='updatesTable'>"
+            $html += "<tr><th onclick='sortTable(""updatesTable"", 0)'>KB Number</th>
+                         <th onclick='sortTable(""updatesTable"", 1)'>Type</th>
+                         <th onclick='sortTable(""updatesTable"", 2)'>Installed On</th>
+                         <th onclick='sortTable(""updatesTable"", 3)'>Installed By</th>
+                         <th onclick='sortTable(""updatesTable"", 4)'>Description</th></tr>"
+
+            foreach ($update in $updates) {
+                $installDate = if ($update.InstalledOn) {
+                    $update.InstalledOn.ToString("yyyy-MM-dd")
+                } else {
+                    "Unknown"
+                }
+
+                $updateType = if ($update.Description -match "Security") {
+                    Get-StatusIndicator -Status "attention" -Text "Security Update" -ToolTip "Security-related update"
+                } else {
+                    Get-StatusIndicator -Status "information" -Text $update.Description -ToolTip "Regular update"
+                }
+
+                $html += "<tr>"
+                $html += "<td>$($update.HotFixID)</td>"
+                $html += "<td>$updateType</td>"
+                $html += "<td>$installDate</td>"
+                $html += "<td>$($update.InstalledBy)</td>"
+                $html += "<td>$($update.Caption)</td>"
+                $html += "</tr>"
+            }
+
+            $html += "</table>"
+
+            # Update Statistics
+            $totalUpdates = $updates.Count
+            $securityUpdates = ($updates | Where-Object { $_.Description -match "Security" }).Count
+            $recentUpdates = ($updates | Where-Object { $_.InstalledOn -gt (Get-Date).AddDays(-30) }).Count
+
+            $html += "<div class='summary-box'>"
+            $html += "<div class='summary-item'><h3>$totalUpdates</h3><p>Total Updates</p></div>"
+            $html += "<div class='summary-item'><h3>$securityUpdates</h3><p>Security Updates</p></div>"
+            $html += "<div class='summary-item'><h3>$recentUpdates</h3><p>Updates (30 days)</p></div>"
+            $html += "</div>"
+        }
+
+        # Add legend at the end of the section
+        $html += "<div class='status-legend'>"
+        $html += "<h4>Status Indicators</h4>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "standard" -Text "Standard" -ToolTip "Meets requirements") + " Standard/Required</div>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "attention" -Text "Review" -ToolTip "May need attention") + " Needs review</div>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "nonstandard" -Text "Non-Standard" -ToolTip "Does not meet requirements") + " Non-standard</div>"
+        $html += "<div class='legend-item'>" + (Get-StatusIndicator -Status "information" -Text "Info" -ToolTip "Informational only") + " Optional/Informational</div>"
+        $html += "</div>"
+    }
+    catch {
+        Write-LogEntry "Error checking software and updates: $($_.Exception.Message)" "ERROR" "Software"
+        $html += "<div class='error-log'>"
+        $html += "<p>Error checking software and updates:</p>"
+        $html += "<pre>$($_.Exception.Message)</pre>"
+        $html += "</div>"
+    }
+
+    $html += "</div>" # End section
+    return $html
+}
+
+# --- External Sites Connectivity ---
+function Get-ExternalSitesConnectivityTable {
+    $sites = @("www.google.com", "www.terra.com.br")
+    $html = "<h3>External Sites Connectivity</h3>"
+    $html += "<table><tr><th>Site</th><th>Status</th><th>Ping (ms)</th></tr>"
+    foreach ($site in $sites) {
+        $result = Test-NetConnection $site -WarningAction SilentlyContinue
+        $status = if ($result.PingSucceeded) {
+            Get-StatusIndicator -Status "standard" -Text "Success"
+        } else {
+            Get-StatusIndicator -Status "nonstandard" -Text "Failed"
+        }
+        $ping = if ($result.PingReplyDetails) { $result.PingReplyDetails.RoundtripTime } else { "-" }
+        $html += "<tr><td>$site</td><td>$status</td><td>$ping</td></tr>"
+    }
+    $html += "</table>"
+    return $html
+}
+
+# --- Log Folder Permissions Table ---
+function Get-LogFolderPermissionsTable {
+    $acl = Get-ACL -Path "C:\Windows\System32\winevt\Logs"
+    $html = "<h3>Log Folder Permission Information</h3>"
+    $html += "<table><tr><th>Identity Reference</th><th>FileSystem Rights</th><th>Access Control Type</th></tr>"
+    foreach ($entry in $acl.Access) {
+        $html += "<tr><td>$($entry.IdentityReference)</td><td>$($entry.FileSystemRights)</td><td>$($entry.AccessControlType)</td></tr>"
+    }
+    $html += "</table>"
+    return $html
+}
+
+# Function to check service configuration with improved tabbed interface
+function Get-ServiceConfiguration {
+    Write-LogEntry "Checking service configuration..." "INFO" "Services"
+    
+    $html = "<div class='section' id='services'><h2>Service Configuration</h2>"
+    $html += "<p>System services organized by importance for compliance monitoring.</p>"
+    
+    try {
+        # Get all services
+        $allServices = Invoke-SafeCommand -Command {
+            Get-Service | Select-Object Name, DisplayName, Status, StartType
+        } -Description "System Services" -Category "Services"
+
+        if (-not $allServices) {
+            $html += "<p>Unable to retrieve service information. Administrator privileges may be required.</p></div>"
+            return $html
+        }
+
+        # Critical services for compliance
+        $criticalServiceNames = @(
+            "WinDefend", "MpsSvc", "wuauserv", "EventLog", "w32time", 
+            "BDESVC", "CryptSvc", "Dhcp", "Dnscache", "RpcSs", "SamSs"
+        )
+
+        $criticalServices = @()
+        $runningServices = @()
+        $stoppedServices = @()
+
+        foreach ($service in $allServices) {
+            if ($criticalServiceNames -contains $service.Name) {
+                $criticalServices += $service
+            } elseif ($service.Status -eq "Running") {
+                $runningServices += $service
+            } else {
+                $stoppedServices += $service
+            }
+        }
+
+        # Tabbed interface
+        $html += @"
+<style>
+.tab-container { margin: 15px 0; }
+.tab-buttons { 
+    display: flex; 
+    border-bottom: 2px solid var(--primary-color, #001b65); 
+    margin-bottom: 10px; 
+}
+.tab-button {
+    background: #f8f9fa;
+    border: none;
+    padding: 10px 16px;
+    cursor: pointer;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    margin-right: 2px;
+    font-weight: bold;
+    color: var(--primary-color, #001b65);
+}
+.tab-button:hover { background: #e9ecef; }
+.tab-button.active { 
+    background: var(--primary-color, #001b65); 
+    color: white; 
+}
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.mandatory { background-color: #e3f2fd !important; }
+</style>
+
+<script>
+function showServiceTab(tabName, btn) {
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
+    document.getElementById(tabName).classList.add('active');
+    btn.classList.add('active');
+}
+</script>
+
+<div class="tab-container">
+    <div class="tab-buttons">
+        <button class="tab-button active" onclick="showServiceTab('critical-tab', this)">Critical Services ($($criticalServices.Count))</button>
+        <button class="tab-button" onclick="showServiceTab('running-tab', this)">Other Running ($($runningServices.Count))</button>
+        <button class="tab-button" onclick="showServiceTab('stopped-tab', this)">Stopped ($($stoppedServices.Count))</button>
+    </div>
+"@
+
+        # Critical Services Tab
+        $html += "<div id='critical-tab' class='tab-content active'>"
+        $html += "<h4>Critical Services for Compliance</h4>"
+        $html += "<table><tr><th>Service</th><th>Status</th><th>Start Type</th><th>Compliance</th></tr>"
+        
+        foreach ($service in ($criticalServices | Sort-Object Name)) {
+            $statusBadge = if ($service.Status -eq "Running") {
+                Get-StatusIndicator -Status "standard" -Text "Running"
+            } else {
+                Get-StatusIndicator -Status "nonstandard" -Text "Stopped"
+            }
+            
+            $compliance = if ($service.Status -eq "Running") {
+                Get-StatusIndicator -Status "standard" -Text "Compliant"
+            } else {
+                Get-StatusIndicator -Status "nonstandard" -Text "Review Required"
+            }
+            
+            $rowClass = if ($global:standardServices[$service.Name] -and $global:standardServices[$service.Name].Required) { " class='mandatory'" } else { "" }
+            
+            $html += "<tr$rowClass>"
+            $html += "<td>$(ConvertTo-SafeHtml $service.DisplayName)</td>"
+            $html += "<td>$statusBadge</td>"
+            $html += "<td>$($service.StartType)</td>"
+            $html += "<td>$compliance</td>"
+            $html += "</tr>"
+        }
+        $html += "</table></div>"
+
+        # Running Services (Summary)
+        $html += "<div id='running-tab' class='tab-content'>"
+        $html += "<h4>Other Running Services</h4>"
+        $html += "<p>Summary of $($runningServices.Count) additional running services.</p>"
+        $html += "<div class='summary-box'>"
+        $html += "<div class='summary-item'><h3>$($runningServices.Count)</h3><p>Total Running</p></div>"
+        $html += "<div class='summary-item'><h3>$(($runningServices | Where-Object StartType -eq 'Automatic').Count)</h3><p>Automatic</p></div>"
+        $html += "<div class='summary-item'><h3>$(($runningServices | Where-Object StartType -eq 'Manual').Count)</h3><p>Manual</p></div>"
+        $html += "</div>"
+        $html += "</div>"
+
+        # Stopped Services (Issues Only)
+        $html += "<div id='stopped-tab' class='tab-content'>"
+        $html += "<h4>Stopped Services</h4>"
+        
+        $problemServices = $stoppedServices | Where-Object { 
+            $_.StartType -eq "Automatic" -and -not ($_.Name -in @("sppsvc", "SysMain", "WbioSrvc"))
+        }
+        
+        if ($problemServices) {
+            $html += "<p>Services set to Automatic but currently stopped:</p>"
+            $html += "<table><tr><th>Service</th><th>Issue</th></tr>"
+            foreach ($service in $problemServices) {
+                $html += "<tr>"
+                $html += "<td>$(ConvertTo-SafeHtml $service.DisplayName)</td>"
+                $html += "<td>" + (Get-StatusIndicator -Status "attention" -Text "Should be running") + "</td>"
+                $html += "</tr>"
+            }
+            $html += "</table>"
+        } else {
+            $html += "<p>✓ No automatic services are unexpectedly stopped.</p>"
+        }
+        
+        $html += "<p><strong>Total stopped services:</strong> $($stoppedServices.Count) (normal for optional services)</p>"
+        $html += "</div>"
+
+        $html += "</div>" # End tab-container
+    }
+    catch {
+        Write-LogEntry "Error checking services: $($_.Exception.Message)" "ERROR" "Services"
+        $html += "<div class='error-log'><p>Error retrieving service information.</p></div>"
+    }
+
+    $html += "</div>" # End section
+    return $html
+}
+
+# Função de Mostrar o Changelog completo
+function Get-DetailedChangeLog {
+    Write-LogEntry "Generating detailed change log..." "INFO" "Changelog"
+    
+    $html = "<div class='section' id='logs'><h2>Execution Log</h2>"
+    $html += "<p>Detailed log of all checks performed during this audit session.</p>"
+    
+    try {
+        if ($global:logEntries.Count -eq 0) {
+            $html += "<div class='info-box'><p>No log entries available for this session.</p></div>"
+        } else {
+            # Group logs by category
+            $logsByCategory = $global:logEntries | Group-Object Category
+            
+            $html += "<div class='summary-box'>"
+            $html += "<div class='summary-item'><h3>$($global:logEntries.Count)</h3><p>Total Checks</p></div>"
+            $html += "<div class='summary-item'><h3>$(($global:logEntries | Where-Object Level -eq 'INFO').Count)</h3><p>Successful</p></div>"
+            $html += "<div class='summary-item'><h3>$(($global:logEntries | Where-Object Level -eq 'WARNING').Count)</h3><p>Warnings</p></div>"
+            $html += "<div class='summary-item'><h3>$(($global:logEntries | Where-Object Level -eq 'ERROR').Count)</h3><p>Errors</p></div>"
+            $html += "</div>"
+
+            # Accordion style for each category
+            foreach ($category in $logsByCategory) {
+                $categoryId = $category.Name.Replace(" ", "")
+                $html += "<h3 onclick='toggleAccordion(""$categoryId"")' style='cursor:pointer; color: var(--primary-color, #001b65);'>📁 $($category.Name) Checks</h3>"
+                $html += "<div id='$categoryId-content' class='accordion-content' style='display:none;'>"
+                $html += "<table class='changelog-table' id='changelogTable_$categoryId'>"
+                $html += "<tr><th>Time</th><th>Level</th><th>Message</th></tr>"
+                
+                foreach ($entry in ($category.Group | Sort-Object Timestamp)) {
+                    $levelBadge = switch ($entry.Level) {
+                        "INFO" { Get-StatusIndicator -Status "standard" -Text "Info" -ToolTip "Action completed successfully" }
+                        "WARNING" { Get-StatusIndicator -Status "attention" -Text "Warning" -ToolTip "Warning condition detected" }
+                        "ERROR" { Get-StatusIndicator -Status "nonstandard" -Text "Error" -ToolTip "Error occurred during execution" }
+                        default { Get-StatusIndicator -Status "information" -Text $entry.Level }
+                    }
+                    
+                    $html += "<tr>"
+                    $html += "<td>$($entry.Timestamp)</td>"
+                    $html += "<td>$levelBadge</td>"
+                    $html += "<td>$(ConvertTo-SafeHtml $entry.Message)</td>"
+                    $html += "</tr>"
+                }
+                $html += "</table>"
+                $html += "</div>"
+            }
+
+            # Add accordion JavaScript
+            $html += @"
+<script>
+function toggleAccordion(categoryId) {
+    var content = document.getElementById(categoryId + '-content');
+    var allContents = document.getElementsByClassName('accordion-content');
+    
+    // Close all other accordions
+    for (var i = 0; i < allContents.length; i++) {
+        if (allContents[i].id !== categoryId + '-content') {
+            allContents[i].style.display = 'none';
+        }
+    }
+    
+    // Toggle current accordion
+    content.style.display = content.style.display === 'none' ? 'block' : 'none';
+}
+</script>
+"@
+        }
+
+        # Execution Summary
+        $html += "<h3>Execution Summary</h3>"
+        $html += "<table>"
+        $html += "<tr><th>Category</th><th>Status</th><th>Details</th></tr>"
+        
+        $categories = @("Changelog", "EventLogs", "Events", "Executive", "General", "Hardware", "Logging", 
+                       "Main", "Network", "Security", "Services", "Software", "Storage", "Summary", 
+                       "SystemInfo", "Time", "TimeServices", "Updates", "UserMgmt")
+        
+        foreach ($cat in $categories) {
+            $categoryLogs = $global:logEntries | Where-Object Category -eq $cat
+            $status = if ($categoryLogs) {
+                if (($categoryLogs | Where-Object Level -eq 'ERROR').Count -eq 0) {
+                    Get-StatusIndicator -Status "standard" -Text "Successful" -ToolTip "All checks passed"
+                } else {
+                    Get-StatusIndicator -Status "nonstandard" -Text "Issues Found" -ToolTip "Some checks failed"
+                }
+            } else {
+                Get-StatusIndicator -Status "information" -Text "Not Executed" -ToolTip "Category was not included in this run"
+            }
+            
+            $details = if ($categoryLogs) { "All checks completed successfully" } else { "Module not included in this execution" }
+            
+            $html += "<tr><td>$cat</td><td>$status</td><td>$details</td></tr>"
+        }
+        $html += "</table>"
+    }
+    catch {
+        Write-LogEntry "Error generating change log: $($_.Exception.Message)" "ERROR" "Changelog"
+        $html += "<div class='error-log'><p>Error generating execution log.</p></div>"
+    }
+
+    $html += "</div>" # End section
+    return $html
+}
+
+# --- MELHORIA: Corrigir status dos SCs quando módulo não foi executado ---
+function Get-SecurityControlsTable {
+    $scList = @(
+        # SC.01 - Gestão de usuários e senhas
+        @{ ID = "SC.01.01"; Desc = "Restrições de contas compartilhadas"; ScriptKey = "Password Policy"; Evidence = "Script" }
+        @{ ID = "SC.01.02"; Desc = "Definir papéis e direitos mínimos"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.01.03"; Desc = "Separação de funções"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.01.04"; Desc = "Revisão periódica de acessos"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.01.05"; Desc = "Tempo máximo de inatividade"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.01.06"; Desc = "Desabilitar contas inativas"; ScriptKey = "Local Users"; Evidence = "Script" }
+        @{ ID = "SC.01.09"; Desc = "Comunicação segura de senhas"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.01.10"; Desc = "Compensações de senha não é possível"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.01.11"; Desc = "Gestão segura de senhas (password manager)"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.01.12"; Desc = "Controles de senha (todos os papéis, APIs)"; ScriptKey = "Password Policy"; Evidence = "Script" }
+        @{ ID = "SC.01.13"; Desc = "Proteção de contas privilegiadas"; ScriptKey = "Local Users"; Evidence = "Script" }
+        @{ ID = "SC.01.14"; Desc = "Autenticação forte/múltipla fora da NN"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.01.15"; Desc = "Senhas confidenciais e armazenamento seguro"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.01.17"; Desc = "Aprovação de acessos"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.01.18"; Desc = "Lista de usuários/controle de acesso"; ScriptKey = ""; Evidence = "Checklist" }
+
+        # SC.02 - Rede
+        @{ ID = "SC.02.01"; Desc = "Arquitetura de rede segregada"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.02.02"; Desc = "Controles de segurança de rede (Firewall)"; ScriptKey = "Windows Firewall Status"; Evidence = "Script" }
+        @{ ID = "SC.02.03"; Desc = "Conexões com terceiros aprovadas"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.02.04"; Desc = "Separar ambientes Prod/Dev/Teste"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.02.06"; Desc = "Soluções PS sem conexão direta Internet"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.02.07"; Desc = "Protocolos seguros em redes wireless"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.02.08"; Desc = "Segmentos de rede distintos"; ScriptKey = ""; Evidence = "Checklist" }
+
+        # SC.03 - Proteção de dados
+        @{ ID = "SC.03.01"; Desc = "Criptografia para dados em trânsito"; ScriptKey = "BitLocker Detailed Status"; Evidence = "Script" }
+        @{ ID = "SC.03.02"; Desc = "Criptografia/mascaramento de dados em repouso"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.03.03"; Desc = "Descarte seguro de mídias"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.03.04"; Desc = "Controles regulatórios específicos"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.03.05"; Desc = "DLP se aplicável"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.03.07"; Desc = "Segredos/chaves em locais seguros"; ScriptKey = ""; Evidence = "Checklist" }
+
+        # SC.04 - Vulnerabilidades e patches
+        @{ ID = "SC.04.01"; Desc = "Identificar componentes críticos"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.04.02"; Desc = "Processo formal para vulnerabilidades"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.04.03"; Desc = "Rotinas de avaliação de vulnerabilidades"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.04.04"; Desc = "Processo para vulnerabilidades fora do patching central"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.04.05"; Desc = "Processo para vulnerabilidades fora do escopo"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.04.06"; Desc = "Corrigir vulnerabilidades críticas imediatamente"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.04.07"; Desc = "Permitir varredura autenticada"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.04.08"; Desc = "Softwares obrigatórios de segurança instalados"; ScriptKey = "Installed Software"; Evidence = "Script" }
+        @{ ID = "SC.04.09"; Desc = "Determinar componentes a atualizar e frequência"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.04.10"; Desc = "Aprovação de patches antes da implementação"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.04.11"; Desc = "Aplicar patches rapidamente após testes"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.04.12"; Desc = "Cumprir requisitos do patching central"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.04.13"; Desc = "Apto a receber atualizações de segurança"; ScriptKey = "Windows Update Service"; Evidence = "Script" }
+
+        # SC.05 - Hardening
+        @{ ID = "SC.05.01"; Desc = "Eliminar credenciais padrão/softwares/serviços não usados"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.05.02"; Desc = "Guias de segurança/boas práticas"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.05.03"; Desc = "Varreduras/testes regulares"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.05.04"; Desc = "Tempo limite para sessões inativas"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.05.05"; Desc = "Tela em branco/protetor de tela com autenticação"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.05.06"; Desc = "Sincronização de tempo com NTP"; ScriptKey = "NTP Status"; Evidence = "Script" }
+        @{ ID = "SC.05.07"; Desc = "Finalizar conexões remotas ao término da sessão"; ScriptKey = ""; Evidence = "Checklist" }
+
+        # SC.06 - Antimalware
+        @{ ID = "SC.06.01"; Desc = "Antivírus instalado e atualizado"; ScriptKey = "Security Status"; Evidence = "Script" }
+        @{ ID = "SC.06.02"; Desc = "Controles alternativos (whitelisting, DLP, isolamento)"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.06.03"; Desc = "Antimalware aprovado instalado/atualizado"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.06.04a"; Desc = "Solução aprovada de antimalware"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.06.05"; Desc = "Whitelisting de aplicações quando viável"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.06.06"; Desc = "Whitelisting obrigatório em servidores críticos"; ScriptKey = ""; Evidence = "Checklist" }
+
+        # SC.07 - Logging e monitoramento
+        @{ ID = "SC.07.01"; Desc = "Identificar eventos críticos de segurança"; ScriptKey = "Event Log Service"; Evidence = "Script" }
+        @{ ID = "SC.07.02"; Desc = "Rotina de revisão dos logs"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.07.03"; Desc = "Controles alternativos se log não viável"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.07.04"; Desc = "Logs protegidos contra alterações"; ScriptKey = "Event Logs Configuration"; Evidence = "Script" }
+        @{ ID = "SC.07.05"; Desc = "Integrar logs à solução centralizada"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.07.06"; Desc = "Definir componentes/eventos a monitorar"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.07.07"; Desc = "Implantar agentes para monitoramento/forense"; ScriptKey = ""; Evidence = "Checklist" }
+
+        # SC.08 - Incidentes
+        @{ ID = "SC.08.01"; Desc = "Encaminhar suspeitas de incidentes para análise"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.08.02"; Desc = "Encaminhar incidentes confirmados para investigação"; ScriptKey = ""; Evidence = "Checklist" }
+
+        # SC.09 - Inventário
+        @{ ID = "SC.09.01"; Desc = "Registrar componentes críticos da solução"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.09.02"; Desc = "Arquitetura de rede e fluxo de dados no inventário"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.09.04"; Desc = "Infraestrutura crítica fora de regiões instáveis"; ScriptKey = ""; Evidence = "Checklist" }
+
+        # SC.10 - Backup e recuperação
+        @{ ID = "SC.10.01.01"; Desc = "Planejar backups conforme requisitos"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.10.01.02"; Desc = "Testes periódicos de backup e evidências"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.10.02"; Desc = "Proteger backups com controles adequados"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.10.03.01"; Desc = "Plano de restauração da solução/dados"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.10.03.02"; Desc = "Testar plano de recuperação e manter evidências"; ScriptKey = ""; Evidence = "Checklist" }
+
+        # SC.11 - Controles físicos e ambientais
+        @{ ID = "SC.11.01"; Desc = "Componentes em local seguro com controle de acesso"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.11.02"; Desc = "Controles físicos em ambientes de fornecedor/cloud"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.11.03"; Desc = "Proteção similar em fornecedor/cloud"; ScriptKey = ""; Evidence = "Checklist" }
+
+        # SC.12 - Fornecedores
+        @{ ID = "SC.12.01"; Desc = "Mitigar riscos em ambientes terceirizados"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.12.02"; Desc = "Solicitar evidências de controles do fornecedor"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.12.03"; Desc = "Avaliação formal de riscos do fornecedor"; ScriptKey = ""; Evidence = "Checklist" }
+        @{ ID = "SC.12.04"; Desc = "Terceiros sigam requisitos e cláusula de auditoria"; ScriptKey = ""; Evidence = "Checklist" }
+    )
+    # Mapeamento de status automático
+    $getStatus = {
+        param($sc)
+        # Checagem real dos resultados dos módulos
+        switch ($sc.ScriptKey) {
+            "Password Policy" {
+                if ($global:checkResults["Password Policy"] -and $global:checkResults["Password Policy"].Status -eq "Success") { "Atende" }
+                elseif ($global:checkResults["Password Policy"] -and $global:checkResults["Password Policy"].Status -eq "Failed") { "Não atende" }
+                else { "Manual Check" }
+            }
+            "Local Users" {
+                if ($global:checkResults["Local Users"] -and $global:checkResults["Local Users"].Status -eq "Success") { "Atende" }
+                elseif ($global:checkResults["Local Users"] -and $global:checkResults["Local Users"].Status -eq "Failed") { "Não atende" }
+                else { "Manual Check" }
+            }
+            "Windows Firewall Status" {
+                if ($global:checkResults["Windows Firewall Status"] -and $global:checkResults["Windows Firewall Status"].Status -eq "Success") { "Atende" }
+                elseif ($global:checkResults["Windows Firewall Status"] -and $global:checkResults["Windows Firewall Status"].Status -eq "Failed") { "Não atende" }
+                else { "Manual Check" }
+            }
+            "BitLocker Detailed Status" {
+                # Checa se todos os volumes estão criptografados e proteção ativada
+                $bitlockerOk = $false
+                if ($global:checkResults["BitLocker Detailed Status"] -and $global:checkResults["BitLocker Detailed Status"].Status -eq "Success") {
+                    $bitlockerRaw = Invoke-SafeCommand -Command { manage-bde -status } -Description "BitLocker Detailed Status"
+                    $bitlockerOk = $bitlockerRaw | Select-String "Conversion Status:\s+Fully Encrypted|Status da Conversão:\s+Totalmente criptografado"
+                    $protOk = $bitlockerRaw | Select-String "Protection Status:\s+Protection On|Status de Proteção:\s+Proteção ativada"
+                    if ($bitlockerOk -and $protOk) { "Atende" } else { "Não atende" }
+                } elseif ($global:checkResults["BitLocker Detailed Status"] -and $global:checkResults["BitLocker Detailed Status"].Status -eq "Failed") {
+                    "Não atende"
+                } else { "Manual Check" }
+            }
+            "Installed Software" {
+                if ($global:checkResults["Installed Software"] -and $global:checkResults["Installed Software"].Status -eq "Success") { "Atende" }
+                elseif ($global:checkResults["Installed Software"] -and $global:checkResults["Installed Software"].Status -eq "Failed") { "Não atende" }
+                else { "Manual Check" }
+            }
+            "Windows Update Service" {
+                if ($global:checkResults["Windows Update Service"] -and $global:checkResults["Windows Update Service"].Status -eq "Success") { "Atende" }
+                elseif ($global:checkResults["Windows Update Service"] -and $global:checkResults["Windows Update Service"].Status -eq "Failed") { "Não atende" }
+                else { "Manual Check" }
+            }
+            "NTP Status" {
+                if ($global:checkResults["NTP Status"] -and $global:checkResults["NTP Status"].Status -eq "Success") { "Atende" }
+                elseif ($global:checkResults["NTP Status"] -and $global:checkResults["NTP Status"].Status -eq "Failed") { "Não atende" }
+                else { "Manual Check" }
+            }
+            "Security Status" {
+                # Checa se o Defender está ativo e atualizado
+                $defender = Invoke-SafeCommand -Command { Get-MpComputerStatus } -Description "Security Status"
+                if ($defender -and $defender.RealTimeProtectionEnabled -and $defender.AVSignatureLastUpdated -and $defender.AVSignatureLastUpdated -gt (Get-Date).AddDays(-7)) {
+                    "Atende"
+                } else {
+                    "Não atende"
+                }
+            }
+            "Event Log Service" {
+                if ($global:checkResults["Event Log Service"] -and $global:checkResults["Event Log Service"].Status -eq "Success") { "Atende" }
+                elseif ($global:checkResults["Event Log Service"] -and $global:checkResults["Event Log Service"].Status -eq "Failed") { "Não atende" }
+                else { "Manual Check" }
+            }
+            "Event Logs Configuration" {
+                if ($global:checkResults["Event Logs Configuration"] -and $global:checkResults["Event Logs Configuration"].Status -eq "Success") { "Atende" }
+                elseif ($global:checkResults["Event Logs Configuration"] -and $global:checkResults["Event Logs Configuration"].Status -eq "Failed") { "Não atende" }
+                else { "Manual Check" }
+            }
+            default { "Manual Check" }
+        }
+    }
+
+    $html = "<div class='section' id='securitycontrols'><h2>IRM Security Controls (SCs) Applicability Table</h2>"
+    $html += "<p>This table summarizes the applicability and evidence for IRM Security Controls (SCs) for Windows machines. Status is based on script checks where possible; otherwise, manual review is required.</p>"
+    $html += "<table id='scTable'><tr><th>ID</th><th>Resumo do Controle</th><th>Status</th><th>Método de Evidência</th><th>Observação</th></tr>"
+    foreach ($sc in $scList) {
+        $status = & $getStatus $sc
+        $statusHtml = switch ($status) {
+            "Atende" { Get-StatusIndicator -Status "standard" -Text "Atende" -ToolTip "Meets requirement" }
+            "Não atende" { Get-StatusIndicator -Status "nonstandard" -Text "Não atende" -ToolTip "Does not meet requirement" }
+            "Not checked (module not executed)" { Get-StatusIndicator -Status "information" -Text "Not checked" -ToolTip "Module not executed or section not included in report" }
+            default { Get-StatusIndicator -Status "attention" -Text "Manual Check" -ToolTip "Requires manual review" }
+        }
+        $obs = if ($sc.Evidence -eq "Script") {
+            if ($status -eq "Manual Check") { "Check not fully automated ou módulo não incluso no relatório" }
+            elseif ($status -eq "Not checked (module not executed)") { "Section not included in this report run" }
+            elseif ($status -eq "Atende") { "Verificado automaticamente pelo script" }
+            elseif ($status -eq "Não atende") { "Falha detectada pelo script - revisar configuração" }
+            else { "Check not fully automated" }
+        } else {
+            "Requires manual review"
+        }
+        $html += "<tr><td>$($sc.ID)</td><td>$($sc.Desc)</td><td>$statusHtml</td><td>$($sc.Evidence)</td><td>$obs</td></tr>"
+    }
+    $html += "</table>"
+    $html += "<div class='status-legend'>"
+    $html += "<h4>Status Legend</h4>"
+    $html += "$(Get-StatusIndicator -Status 'standard' -Text 'Atende') + ' Atende &nbsp; '"
+    $html += "$(Get-StatusIndicator -Status 'nonstandard' -Text 'Não atende') + ' Não atende &nbsp; '"
+    $html += "$(Get-StatusIndicator -Status 'attention' -Text 'Manual Check') + ' Manual Check'"
+    $html += "$(Get-StatusIndicator -Status 'information' -Text 'Not checked') + ' Not checked (module not executed)'"
+    $html += "</div>"
+    $html += "</div>"
+    return $html
+}
+
+# --- Função dummy para evitar erro se Get-ServiceConfiguration não existir ---
+function Get-ServiceConfiguration {
+    return "<div class='error-log'><p>Service Configuration section is not implemented in this script.</p></div>"
+}
+
+# --- Função dummy para evitar erro se Get-DetailedChangeLog não existir ---
+function Get-DetailedChangeLog {
+    return "<div class='error-log'><p>Detailed Change Log section is not implemented in this script.</p></div>"
+}
+
+# --- Main execution function with improved error handling and logging ---
+function Start-SecurityAudit {
+    param([string]$Module = "complete")
+    
+    # Adicionar HashSet para controle de módulos processados
+    $processedModules = New-Object System.Collections.Generic.HashSet[string]
+    
+    Write-LogEntry "Starting IT Security Control Script v$scriptVersion" "INFO" "Main"
+    Write-LogEntry "Computer: $computerName | User: $currentUser | Admin: $isAdmin" "INFO" "Main"
+    
+    $htmlContent = Get-HTMLHeader
+
+    # Adicionar alerta se não for administrador
+    if (-not $isAdmin) {
+        $htmlContent += @"
+        <div class='admin-warning'>
+            <strong>Limited Mode:</strong> Some checks require administrator privileges for complete results.
+        </div>
+"@
+    }
+
+    # Adicionar conteúdo com base nos módulos selecionados
+    try {
+        $selectedModules = $Module -split ","
+        foreach ($selectedModule in $selectedModules) {
+            switch ($selectedModule.Trim()) {
+                "Summary Dashboard" {
+                    if (-not $processedModules.Contains("summary")) {
+                        $htmlContent += "<div class='section' id='summary'>"
+                        $htmlContent += Get-SummaryDashboard
+                        $htmlContent += "</div>"
+                        $processedModules.Add("summary")
+                    }
+                }
+                "Executive Summary" {
+                    if (-not $processedModules.Contains("executive")) {
+                        $htmlContent += "<div class='section' id='executive'>"
+                        $htmlContent += Get-ExecutiveSummary
+                        $htmlContent += "</div>"
+                        $processedModules.Add("executive")
+                    }
+                }
+                "System Information" {
+                    if (-not $processedModules.Contains("system")) {
+                        $htmlContent += "<div class='section' id='system'>"
+                        $htmlContent += Get-SystemInformation
+                        $htmlContent += "</div>"
+                        $processedModules.Add("system")
+                    }
+                }
+                "User Management" {
+                    if (-not $processedModules.Contains("users")) {
+                        $htmlContent += "<div class='section' id='users'>"
+                        $htmlContent += Get-UserManagement
+                        $htmlContent += "</div>"
+                        $processedModules.Add("users")
+                    }
+                }
+                "Network Security" {
+                    if (-not $processedModules.Contains("network")) {
+                        $htmlContent += "<div class='section' id='network'>"
+                        $htmlContent += Get-NetworkSecurity
+                        $htmlContent += "</div>"
+                        $processedModules.Add("network")
+                    }
+                }
+                "Time Configuration" {
+                    if (-not $processedModules.Contains("time")) {
+                        $htmlContent += "<div class='section' id='time'>"
+                        $htmlContent += Get-TimeAndServices
+                        $htmlContent += "</div>"
+                        $processedModules.Add("time")
+                    }
+                }
+                "Security Controls" {
+                    if (-not $processedModules.Contains("security") -and -not $processedModules.Contains("network")) {
+                        $htmlContent += "<div class='section' id='security'>"
+                        $htmlContent += Get-NetworkSecurity
+                        $htmlContent += "</div>"
+                        $processedModules.Add("security")
+                        $processedModules.Add("network") # Evita duplicação com Network Security
+                    }
+                }
+                "Monitoring" {
+                    if (-not $processedModules.Contains("monitoring") -and -not $processedModules.Contains("events")) {
+                        $htmlContent += "<div class='section' id='monitoring'>"
+                        $htmlContent += Get-EventLogStatus
+                        $htmlContent += "</div>"
+                        $processedModules.Add("monitoring")
+                        $processedModules.Add("events") # Evita duplicação com Event Management
+                    }
+                }
+                "Event Management" {
+                    if (-not $processedModules.Contains("events") -and -not $processedModules.Contains("monitoring")) {
+                        $htmlContent += "<div class='section' id='events'>"
+                        $htmlContent += Get-EventLogStatus
+                        $htmlContent += "</div>"
+                        $processedModules.Add("events")
+                        $processedModules.Add("monitoring") # Evita duplicação com Monitoring
+                    }
+                }
+                "Software Management" {
+                    if (-not $processedModules.Contains("software") -and -not $processedModules.Contains("updates")) {
+                        $htmlContent += "<div class='section' id='software'>"
+                        $htmlContent += Get-SoftwareAndUpdates
+                        $htmlContent += "</div>"
+                        $processedModules.Add("software")
+                        $processedModules.Add("updates") # Evita duplicação com System Updates
+                    }
+                }
+                "System Updates" {
+                    if (-not $processedModules.Contains("updates") -and -not $processedModules.Contains("software")) {
+                        $htmlContent += "<div class='section' id='updates'>"
+                        $htmlContent += Get-SoftwareAndUpdates
+                        $htmlContent += "</div>"
+                        $processedModules.Add("updates")
+                        $processedModules.Add("software") # Evita duplicação com Software Management
+                    }
+                }
+                "Service Configuration" {
+                    if (-not $processedModules.Contains("services")) {
+                        $htmlContent += "<div class='section' id='services'>"
+                        $htmlContent += Get-ServiceConfiguration
+                        $htmlContent += "</div>"
+                        $processedModules.Add("services")
+                    }
+                }
+                "Detailed Logs" {
+                    if (-not $processedModules.Contains("logs")) {
+                        $htmlContent += "<div class='section' id='logs'>"
+                        $htmlContent += Get-DetailedChangeLog
+                        $htmlContent += "</div>"
+                        $processedModules.Add("logs")
+                    }
+                }
+                default { Write-LogEntry "Unknown module: $selectedModule" "WARNING" "Main" }
+            }
+        }
+
+        # --- ADICIONAR TABELA DE SCs ANTES DO DETAILED CHANGE LOG ---
+        $htmlContent += Get-SecurityControlsTable
+        
+        # Detailed Change Log por último
+        if (-not $processedModules.Contains("logs")) {
+            $htmlContent += "<div class='section' id='logs'>"
+            $htmlContent += Get-DetailedChangeLog
+            $htmlContent += "</div>"
+            $processedModules.Add("logs")
+        }
+
+        # Remover chamadas redundantes
+        # $htmlContent += Get-SecurityConnectionsTable  # Removido - já incluído em Network Security
+        # $htmlContent += Get-ExternalTCPConnectionsTable  # Removido - não é mais necessário
+        
+        # Add footer
+        $htmlContent += @"
+        <div class='footer'>
+            <p><strong>IT Security Control Script v$scriptVersion</strong></p>
+            <p>Generated on $executionDate by $currentUser on $computerName</p>
+            <p>Mode: $(if ($isAdmin) { "Administrator" } else { "Standard User" })</p>
+            <p>For support, contact the IT Security Team</p>
+        </div>
+        </div>
+        </body>
+        </html>
+"@
+        # Save HTML file
+        $defaultPath = "C:\TEMP\Script"
+        Write-Host ""
+        $savePath = $null
+        $useDefault = Read-Host "Save report to default path '$defaultPath'? (S/N ou Y/N)"
+        if ($useDefault -match '^(N|n)$') {
+            $savePath = Read-Host "Enter the full path where you want to save the report (e.g., C:\TEMP\Script)"
+            if ([string]::IsNullOrWhiteSpace($savePath)) {
+                Write-Host "No path provided. Report not saved." -ForegroundColor Red
+                return
+            }
+            if (-not (Test-Path -Path $savePath -PathType Container)) {
+                Write-Host "The path '$savePath' does not exist or is not a folder. Please create it first." -ForegroundColor Red
+                return
+            }
+        } else {
+            $savePath = $defaultPath
+            if (-not (Test-Path -Path $savePath -PathType Container)) {
+                Write-Host "The default path '$savePath' does not exist or is not a folder. Please create it first." -ForegroundColor Red
+                return
+            }
+        }
+        $outputPath = Join-Path -Path $savePath -ChildPath "$computerName-$executionDate-SecurityAudit.html"
+
+        $htmlContent | Out-File -FilePath $outputPath -Encoding UTF8
+        Write-LogEntry "Report saved to: $outputPath" "INFO" "Main"
+        Write-Host "`nReport generated successfully!" -ForegroundColor Green
+        Write-Host "File: $outputPath" -ForegroundColor Cyan
+
+        if (-not $isAdmin) {
+            Write-Host "`nIMPORTANT: Some checks were limited. Run as administrator for complete results." -ForegroundColor Yellow
+        }
+
+        # Open file automatically
+        $openFile = Read-Host "`nWould you like to open the report now? (Y/N)"
+        if ($openFile -eq 'Y' -or $openFile -eq 'y' -or $openFile -eq 'S' -or $openFile -eq 's') {
+            Start-Process $outputPath
+        }
+    }
+    catch {
+        Write-LogEntry "Critical error during execution: $($_.Exception.Message)" "ERROR" "Main"
+        Write-Host "Error generating report: $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+# Main script execution
+if ($NoGUI -and $Module) {
+    Start-SecurityAudit -Module $Module
+}
+else {
+    $selection = Show-ScriptSelectionGUI
+    if ($selection["Action"] -eq "run") {
+        Start-SecurityAudit -Module $selection["Modules"]
+    }
+    elseif ($selection["Action"] -eq "cancel") {
+        Write-Host "Script execution cancelled by user." -ForegroundColor Yellow
+        exit
+    }
+}
